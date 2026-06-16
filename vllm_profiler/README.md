@@ -52,7 +52,7 @@ python -m vllm_profiler.summarize ./vllm_prof_out
 ### MoE (`enable("moe")`) — hook: `FusedMoEKernelModularImpl`
 | 요청 항목 | 기록 `kind` | 핵심 필드 |
 |---|---|---|
-| ① Dispatch/Combine 토큰별 전송 사이즈 | `moe_dispatch_size`, `moe_combine_size`, `moe_dispatch`(ms), `moe_combine`(ms) | `bytes_in`/`bytes_recv`/`bytes_out`, `per_token_bytes` |
+| ① Dispatch/Combine 토큰별 전송 사이즈 + **batch된 토큰 수** | `moe_dispatch_size`, `moe_dispatch_tokens`, `moe_combine_size`, `moe_dispatch`/`moe_combine`(ms) | `bytes_in`/`bytes_recv`/`bytes_out`, `per_token_bytes`, `tokens_in`, `routing_slots_sent`(=tok×topk), `tokens_recv`(Standard) 또는 `n_local_experts`/`max_tokens_per_expert`/`tokens_recv_padded`(BatchedExperts), `expert_num_tokens`(expert별 실제 토큰 수) |
 | ② 토큰 전송 방식 (배치 묶음 vs 개별) | `moe_call` | `pf_class`, `act_format`, `grouping` |
 | ③ Expert 부하 분포 (토큰별 routing) | `moe_expert_load` | `counts`(expert별 routing 횟수) |
 

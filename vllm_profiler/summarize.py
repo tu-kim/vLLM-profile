@@ -70,6 +70,33 @@ def summarize(path: str) -> None:
         _p("avg bytes sent (prepare in)", _mean([d.get("bytes_in") for d in disp]), "B")
         _p("avg bytes recv (local experts)", _mean([d.get("bytes_recv") for d in disp]), "B")
         _p("avg per-token bytes", _mean([d.get("per_token_bytes") for d in disp]), "B/tok")
+        # Batched token counts -- how many tokens went into one dispatch.
+        print("    -- batched token counts --")
+        _p("avg local tokens sent", _mean([d.get("tokens_in") for d in disp]), "tok")
+        _p("avg routing slots sent (tok*topk)",
+           _mean([d.get("routing_slots_sent") for d in disp]), "slots")
+        recv2d = [d.get("tokens_recv") for d in disp if d.get("tokens_recv") is not None]
+        if recv2d:
+            _p("avg tokens recv (Standard 2D)", _mean(recv2d), "tok")
+        recv3d = [d for d in disp if d.get("layout") == "batched_experts_3d"]
+        if recv3d:
+            _p("avg local experts (E)", _mean([d.get("n_local_experts") for d in recv3d]), "")
+            _p("avg max tokens/expert (pad cap)",
+               _mean([d.get("max_tokens_per_expert") for d in recv3d]), "tok")
+            _p("avg recv padded (E*max)",
+               _mean([d.get("tokens_recv_padded") for d in recv3d]), "tok")
+    dtok = by_kind.get("moe_dispatch_tokens", [])
+    if dtok:
+        # Real (unpadded) per-local-expert batched counts.
+        reals, maxs = [], []
+        for d in dtok:
+            ent = d.get("expert_num_tokens") or []
+            if ent:
+                reals.append(sum(ent))
+                maxs.append(max(ent))
+        if reals:
+            _p("avg real tokens recv (unpadded)", _mean(reals), "tok")
+            _p("avg busiest local expert", _mean(maxs), "tok")
     if comb:
         print("\n[MoE] combine transfer size (item 1):")
         _p("avg bytes in (expert out)", _mean([c.get("bytes_in") for c in comb]), "B")

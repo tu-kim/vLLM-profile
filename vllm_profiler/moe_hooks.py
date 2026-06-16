@@ -93,32 +93,34 @@ def _transfer_method(pf: Any) -> dict[str, Any]:
     return {"pf_class": cls, "act_format": fmt, "grouping": grouping}
 
 
-# --- expert load-balance histogram buffer -------------------------------------
-class _HistBuffer:
-    """Accumulates topk_ids histograms on GPU; drains to host at flush."""
+# --- deferred GPU->host buffer ------------------------------------------------
+class _DeferredBuffer:
+    """Holds (kind, field, meta, gpu_tensor) tuples and drains them to host at
+    flush time -- a single ``synchronize()`` (in resolve_pending) covers the
+    whole batch, so per-call ``.tolist()`` never stalls the hot path."""
 
     def __init__(self) -> None:
-        self._pending: list[tuple[dict, Any]] = []
+        self._pending: list[tuple[str, str, dict, Any]] = []
         register_resolver(self.drain)
 
-    def add(self, meta: dict, hist_gpu: Any) -> None:
-        self._pending.append((meta, hist_gpu))
+    def add(self, kind: str, field: str, meta: dict, tensor: Any) -> None:
+        self._pending.append((kind, field, meta, tensor))
 
     def drain(self) -> None:
         if not self._pending:
             return
         rec = get_recorder()
         pending, self._pending = self._pending, []
-        for meta, hist in pending:
-            counts = hist.tolist() if hasattr(hist, "tolist") else list(hist)
-            rec.record("moe_expert_load", counts=counts, **meta)
+        for kind, field, meta, tensor in pending:
+            vals = tensor.tolist() if hasattr(tensor, "tolist") else list(tensor)
+            rec.record(kind, **{field: vals}, **meta)
 
 
-_hist: _HistBuffer | None = None
+_buf: _DeferredBuffer | None = None
 
 
 def _record_load_balance(topk_ids: Any, global_num_experts: int, meta: dict) -> None:
-    if torch is None or topk_ids is None or _hist is None:
+    if torch is None or topk_ids is None or _buf is None:
         return
     try:
         flat = topk_ids.flatten()
@@ -126,7 +128,27 @@ def _record_load_balance(topk_ids: Any, global_num_experts: int, meta: dict) -> 
         if ne is None:
             ne = int(flat.max().item()) + 1
         hist = torch.bincount(flat.to(torch.int64), minlength=ne)
-        _hist.add(meta, hist)
+        _buf.add("moe_expert_load", "counts", meta, hist)
+    except Exception:
+        pass
+
+
+def _record_batched_tokens(a1q: Any, etm: Any, meta: dict) -> None:
+    """Per-local-expert batched token counts (the real, unpadded count of tokens
+    each local expert received in this dispatch)."""
+    if etm is None or _buf is None:
+        return
+    try:
+        # Prefer the ready CPU copy (no sync); else defer the GPU tensor.
+        cpu = getattr(etm, "expert_num_tokens_cpu", None)
+        if cpu is not None:
+            get_recorder().record(
+                "moe_dispatch_tokens", expert_num_tokens=cpu.tolist(), **meta
+            )
+        else:
+            gpu = getattr(etm, "expert_num_tokens", None)
+            if gpu is not None:
+                _buf.add("moe_dispatch_tokens", "expert_num_tokens", meta, gpu)
     except Exception:
         pass
 
@@ -181,21 +203,47 @@ def _wrap_prepare(orig):
         hidden_states = _arg(args, kwargs, 0, "hidden_states")
         meta = dict(getattr(_ctx, "cur", None) or {})
         bytes_in = nbytes(hidden_states)  # tokens handed to dispatch (local)
+        tokens_in = int(hidden_states.shape[0]) if hidden_states is not None else -1
+        top_k = meta.get("top_k", -1)
         with Region("moe_dispatch", phase="prepare", bytes_in=bytes_in, **meta):
             out = orig(self, *args, **kwargs)
         # out == (a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights)
         try:
             a1q = out[0]
+            etm = out[2] if len(out) > 2 else None
+            shape = list(a1q.shape) if a1q is not None else None
+
+            # Batched token-count accounting (no sync -- derived from shapes).
+            tok = {
+                "tokens_in": tokens_in,                       # local tokens dispatched out
+                "routing_slots_sent": (tokens_in * top_k)     # (token,expert) pairs sent
+                if tokens_in >= 0 and top_k and top_k > 0 else None,
+            }
+            if shape and len(shape) == 2:
+                # Standard layout [recv_tokens, hidden]: dim0 == batched tokens
+                # this rank's local experts received across all senders.
+                tok["tokens_recv"] = shape[0]
+                tok["layout"] = "standard_2d"
+            elif shape and len(shape) == 3:
+                # BatchedExperts layout [E, max_tokens_per_expert, hidden].
+                tok["n_local_experts"] = shape[0]
+                tok["max_tokens_per_expert"] = shape[1]       # padded capacity
+                tok["tokens_recv_padded"] = shape[0] * shape[1]
+                tok["layout"] = "batched_experts_3d"
+
             get_recorder().record(
                 "moe_dispatch_size",
                 phase="prepare",
                 bytes_in=bytes_in,                 # sent out from this rank
                 bytes_recv=nbytes(a1q),            # tokens received for local experts
-                recv_shape=list(a1q.shape) if a1q is not None else None,
-                per_token_bytes=(bytes_in // meta["num_tokens"])
-                if meta.get("num_tokens", 0) > 0 else None,
+                recv_shape=shape,
+                per_token_bytes=(bytes_in // tokens_in) if tokens_in > 0 else None,
+                **tok,
                 **meta,
             )
+            # Real (unpadded) per-local-expert batched token counts.
+            _record_batched_tokens(a1q, etm, {"moe_layer": meta.get("moe_layer"),
+                                              "call_seq": meta.get("call_seq")})
         except Exception:
             pass
         return out
@@ -226,12 +274,12 @@ def _wrap_finalize(orig):
 
 def install() -> list[str]:
     """Monkey-patch the modular MoE kernel.  Returns list of patched targets."""
-    global _hist
+    global _buf
     if torch is None:
         return []
     from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 
-    _hist = _HistBuffer()
+    _buf = _DeferredBuffer()
     patched = []
     cls = mk.FusedMoEKernelModularImpl
     for name, wrapper in (
