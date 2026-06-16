@@ -39,9 +39,10 @@ class _Pending:
 
 _PENDING: list[_Pending] = []
 # Resolve in batches so the pending list (and its CUDA events) stay bounded.
-# Lower -> timing (ms) records land sooner & on-disk data is fresher, at the
-# cost of more frequent cuda.synchronize() (higher measurement overhead).
-_RESOLVE_EVERY = int(os.environ.get("VLLM_PROFILER_RESOLVE_EVERY", "128"))
+# Higher -> fewer cuda.synchronize() calls -> lower measurement overhead, at the
+# cost of holding more CUDA Event objects and fresher-data latency. Lower it only
+# if you need timing (ms) records to land sooner.
+_RESOLVE_EVERY = int(os.environ.get("VLLM_PROFILER_RESOLVE_EVERY", "2048"))
 
 # Extra resolvers (e.g. MoE histogram buffers) that also need the post-sync
 # window to move GPU tensors to host without paying a per-call synchronize.

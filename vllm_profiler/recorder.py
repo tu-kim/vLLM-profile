@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover - import guard
     torch = None  # type: ignore
 
 
-_FLUSH_EVERY = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "64"))
+_FLUSH_EVERY = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "1024"))
 
 
 def _detect_rank() -> int:
