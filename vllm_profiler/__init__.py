@@ -55,7 +55,7 @@ def enable(*categories: str, comm: bool = True) -> dict[str, list[str]]:
     """
     cats = {_ALIASES.get(c.lower(), c.lower()) for c in categories} or {"moe", "attn"}
     patched: dict[str, list[str]] = {}
-    # Always guard run phase so warmup/dummy records get tagged & filterable.
+    # Always install the per-forward prefill/decode tagger.
     if "phase" not in _ENABLED:
         patched["phase"] = runphase.install()
         _ENABLED.add("phase")

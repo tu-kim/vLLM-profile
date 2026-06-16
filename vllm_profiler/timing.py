@@ -71,8 +71,8 @@ class Region:
     __slots__ = ("kind", "fields", "_start", "_end")
 
     def __init__(self, kind: str, **fields: Any) -> None:
-        # Timing records are emitted later (at resolve), so capture the run
-        # phase (dummy / prefill-decode) now, while the forward is running.
+        # Timing records are emitted later (at resolve), so capture the batch
+        # phase (prefill/decode) now, while the forward is running.
         stamp_tags(fields)
         self.kind = kind
         self.fields = fields

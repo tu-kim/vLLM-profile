@@ -16,10 +16,10 @@ import os
 import sys
 from collections import defaultdict
 
-# By default skip the first flush-batch worth of records per rank file: the
-# opening buffer tends to straddle init/warmup, so dropping ~one flush gives a
-# clean steady-state average. Same env key as the recorder's flush size.
-_DEFAULT_SKIP = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "1024"))
+# Init/warmup records sit at the front of each rank file and are hard to tag
+# reliably, so we just drop a fixed number of leading lines per file and average
+# the steady state. Override with --skip=N or VLLM_PROFILER_SKIP.
+_DEFAULT_SKIP = int(os.environ.get("VLLM_PROFILER_SKIP", "30000"))
 
 
 def _load(path: str, skip: int = 0):
@@ -52,8 +52,7 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def summarize(path: str, include_dummy: bool = False, phase: str | None = None,
-              skip: int | None = None) -> None:
+def summarize(path: str, phase: str | None = None, skip: int | None = None) -> None:
     if skip is None:
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
@@ -62,17 +61,7 @@ def summarize(path: str, include_dummy: bool = False, phase: str | None = None,
               (f" (after skipping first {skip} lines/file)" if skip else ""))
         return
     if skip:
-        print(f"(skipped first {skip} lines per rank file ~= one flush; "
-              f"--skip=0 to keep)")
-    # Drop warmup/dummy-run records (memory profiling, cudagraph capture, DP
-    # idle-rank lockstep) unless explicitly asked to keep them.
-    n_dummy = sum(1 for r in rows if r.get("dummy"))
-    if not include_dummy:
-        rows = [r for r in rows if not r.get("dummy")]
-    if n_dummy:
-        kept = "kept" if include_dummy else "dropped"
-        print(f"(note: {n_dummy} dummy/warmup records {kept}; "
-              f"pass --include-dummy to keep)")
+        print(f"(skipped first {skip} lines per rank file; --skip=0 to keep)")
 
     # Per-forward phase (prefill / decode / mixed) breakdown + optional filter.
     bt_counts = defaultdict(int)
@@ -265,14 +254,12 @@ def summarize(path: str, include_dummy: bool = False, phase: str | None = None,
 
 if __name__ == "__main__":
     argv = list(sys.argv[1:])
-    include_dummy = "--include-dummy" in argv
     phase = None
-    skip = None  # None -> default (one flush worth)
+    skip = None  # None -> default fixed skip
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]
         elif a.startswith("--skip="):
             skip = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
-    summarize(pos[0] if pos else "./vllm_prof_out",
-              include_dummy=include_dummy, phase=phase, skip=skip)
+    summarize(pos[0] if pos else "./vllm_prof_out", phase=phase, skip=skip)

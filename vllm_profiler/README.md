@@ -44,25 +44,20 @@ VLLM_PROFILER=moe,attn  vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
 
 ### 3) 결과 요약
 ```bash
-python -m vllm_profiler.summarize ./vllm_prof_out             # 기본: dummy 제외 + 앞 1 flush분 스킵
-python -m vllm_profiler.summarize ./vllm_prof_out --skip=0          # 스킵 없이 (dummy만 제외)
-python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy   # warmup 포함
+python -m vllm_profiler.summarize ./vllm_prof_out             # 기본: 앞 30000줄/파일 스킵 후 평균
+python -m vllm_profiler.summarize ./vllm_prof_out --skip=0          # 스킵 없이 전체
+python -m vllm_profiler.summarize ./vllm_prof_out --skip=50000      # 앞 50000줄 제외
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
-python -m vllm_profiler.summarize ./vllm_prof_out --skip=15000      # 앞 15000줄 제외
+python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
 ```
 
-**기본 동작 = dummy 제외 + 앞 "한 flush 분량" 스킵.** init/warmup 레코드는 각 rank 파일
-**앞쪽**에 모여 있어, 첫 flush 버퍼가 init/warmup과 겹치기 쉽습니다. 그래서 기본적으로
-**파일별 앞 `FLUSH_EVERY`(기본 1024)줄을 제외**하고 steady-state로 평균냅니다.
+**init/warmup 제거 = 앞쪽 고정 스킵.** vLLM 초기화(메모리 프로파일링, DeepGEMM/FlashInfer
+warmup, Triton/샘플러 warmup, cudagraph 캡처)는 각 rank 파일 **앞쪽**에 기록됩니다. 이
+init 레코드를 신뢰성 있게 태깅하기 어렵고(경로가 제각각), serving-gate 방식은 일부 rank에서
+오태깅 문제가 있어, 단순하게 **파일별 앞 N줄(기본 30000)을 고정 제외**하고 steady-state로
+평균냅니다.
 - `--skip=N` 으로 줄 수 직접 지정, `--skip=0` 으로 스킵 해제.
-- 스킵 기준값은 `VLLM_PROFILER_FLUSH_EVERY`(recorder의 flush 크기)와 동일 env를 따릅니다.
-- dummy 태깅 필터와 **함께** 적용됩니다 (skip 후 dummy도 추가 제외).
-
-**Warmup/init 자동 분리:** **첫 실제 추론(`execute_model`) 이전의 모든 이벤트는
-init/warmup으로 간주**되어 `dummy: True`로 태깅됩니다 — 메모리 프로파일링,
-**DeepGEMM/FlashInfer 커널 warmup**, CUDA graph 캡처, 가중치 로드 등 경로가 제각각인
-초기화 단계를 한 번에 커버합니다. 서빙 중 DP idle-rank lockstep(`_dummy_run`)도
-`dummy: True`로 태깅됩니다. summarize가 **기본 제외**하고 실데이터만 남깁니다.
+- 기본값은 `VLLM_PROFILER_SKIP`(기본 30000) env로 변경 가능.
 
 **prefill/decode 라벨:** 실제 forward는 `execute_model`에서 요청별 토큰 수로 분류해
 모든 이벤트에 `batch_type`(`prefill`/`decode`/`mixed`)을 태깅합니다. (chunked-prefill을
