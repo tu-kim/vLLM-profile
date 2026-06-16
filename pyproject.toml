@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-profiler"
+version = "0.1.0"
+description = "Non-invasive vLLM 0.18.0 profiling addon for DeepSeek V3 (MLA+MoE) and Llama 3.1 405B (GQA)"
+readme = "README.md"
+requires-python = ">=3.9"
+# torch / vllm are provided by the host environment; intentionally not pinned.
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/tu-kim/vLLM-profile"
+
+# Registers the profiler with vLLM's plugin loader so it activates in every
+# worker/engine process (vllm serve, api_server, LLM API), gated by the
+# VLLM_PROFILER env var.
+[project.entry-points."vllm.general_plugins"]
+vllm_profiler = "vllm_profiler.plugin:register"
+
+[tool.setuptools]
+packages = ["vllm_profiler"]

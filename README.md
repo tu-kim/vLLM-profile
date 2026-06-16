@@ -8,19 +8,26 @@ monkey-patch로 계측합니다.
 - DeepSeek V3: **EP16 / DP8 / TP2**
 - Llama 3.1 405B: **TP8 / DP2**
 
-## 설치
+## 설치 & 활성화
 
-vLLM 0.18.0이 설치된 환경에서, 이 저장소를 PYTHONPATH에 두거나 프로젝트에 복사:
+vLLM은 멀티 GPU(EP/DP/TP)에서 모델 forward를 **워커 서브프로세스**에서 실행하므로,
+프로파일러가 **각 워커 안에서** 모델 빌드 전에 패치돼야 합니다. 이를 위해 vLLM의
+general-plugin 메커니즘(`vllm.general_plugins`, 모든 워커/엔진 프로세스에서 로드)에
+등록합니다 — `vllm serve` 포함 모든 실행 방식에서 동일하게 동작합니다.
 
 ```bash
 git clone https://github.com/tu-kim/vLLM-profile.git
-export PYTHONPATH=$PWD/vLLM-profile:$PYTHONPATH
+cd vLLM-profile
+pip install -e .          # vllm.general_plugins entry point 등록
 ```
 
-## 사용
+설치 후엔 **환경변수만**으로 켜집니다 (코드 수정 불필요):
 
 ```bash
-# import 한 줄 + 환경변수로 활성화 (enforce-eager 권장)
+# vllm serve (권장 경로)
+VLLM_PROFILER=moe,attn vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
+
+# openai api_server 도 동일
 VLLM_PROFILER=moe,attn python -m vllm.entrypoints.openai.api_server \
     --model deepseek-ai/DeepSeek-V3 --enforce-eager ...
 
@@ -28,14 +35,20 @@ VLLM_PROFILER=moe,attn python -m vllm.entrypoints.openai.api_server \
 python -m vllm_profiler.summarize ./vllm_prof_out
 ```
 
-또는 코드에서:
+- `VLLM_PROFILER`가 미설정/`off`면 설치돼 있어도 아무 패치도 하지 않습니다 (always-on 아님).
+- 항목별로 따로: `VLLM_PROFILER=moe` 또는 `VLLM_PROFILER=attn`.
+
+### in-process `LLM` API 또는 plugin 없이 쓰기
+직접 import해서 켤 수도 있습니다 (단일 프로세스/직접 제어 시):
 
 ```python
 import vllm_profiler
-vllm_profiler.enable("moe")          # MoE만
-vllm_profiler.enable("attn")         # Attention만
-vllm_profiler.enable("moe", "attn")  # 둘 다 (항목별로 따로 켤 수 있음)
+vllm_profiler.enable("moe", "attn")   # enable("moe") / enable("attn") 개별 토글
 ```
+
+> **`pip install` 없이 빠르게:** site-packages에 `import vllm_profiler`를 실행하는
+> `.pth` 파일을 두면 모든 파이썬 프로세스에서 자동 import됩니다. 단, plugin 방식이
+> 워커 로드 타이밍·이식성 면에서 더 안전합니다.
 
 > **주의:** vLLM은 기본적으로 CUDA Graph / `torch.compile`을 사용하며 이 구간에선 Python
 > 레벨 forward 훅이 우회될 수 있습니다. 정확한 계측을 위해 프로파일링 실행은

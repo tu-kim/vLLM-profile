@@ -20,13 +20,19 @@ vllm_profiler.enable("attn")         # Attention만
 vllm_profiler.enable("moe", "attn")  # 둘 다
 ```
 
-### 2) 환경변수로 활성화 (런치 스크립트 무수정)
-런치 진입점에서 `import vllm_profiler` 한 줄만 있으면 됨:
+### 2) `vllm serve` / api_server (plugin 등록, 권장)
+멀티 GPU는 모델이 워커 서브프로세스에서 돌기 때문에, 각 워커에서 패치되도록 vLLM
+general-plugin으로 등록합니다. `pip install -e .` 한 번이면 entry point가 잡히고,
+이후엔 환경변수만으로 켜집니다 (`vllm serve`에서도 동일하게 동작):
 
 ```bash
-VLLM_PROFILER=moe,attn  python -m vllm.entrypoints.openai.api_server \
-    --model deepseek-ai/DeepSeek-V3 --enforce-eager ...
+pip install -e .    # vllm.general_plugins entry point 등록 (plugin.py:register)
+VLLM_PROFILER=moe,attn  vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
 ```
+
+`register()`는 `worker_base.py`의 `load_general_plugins()`가 **각 워커**에서 모델
+빌드 전에 호출하므로 EP/DP/TP fan-out 전체에 패치가 적용됩니다. `VLLM_PROFILER`가
+미설정이면 설치돼 있어도 패치하지 않습니다.
 
 > **중요 — `--enforce-eager` 권장.** vLLM은 CUDA Graph / `torch.compile`을 기본
 > 사용합니다. 컴파일/그래프 캡처 구간에서는 Python 레벨 forward 훅이 우회되거나
