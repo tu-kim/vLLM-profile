@@ -52,13 +52,14 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def _by_seqlen(rows) -> None:
+def _by_seqlen(rows, bin_width: int | None = None) -> None:
     """Bucket key timing metrics by sequence length for a length sweep.
 
     Buckets on ``seq_len`` (total sequence length = context + this step's
     tokens, set per forward) so it works for BOTH prefill (length = prompt len)
     and decode (length = context + 1). Falls back to num_tokens if seq_len is
-    absent."""
+    absent. ``bin_width`` groups nearby lengths into [k*w, (k+1)*w) bins -- useful
+    when a benchmark sends variable lengths (e.g. random dataset)."""
     kinds = ["attn_total", "moe_total", "moe_dispatch", "moe_combine"]
     by_kind = defaultdict(list)
     for r in rows:
@@ -66,22 +67,32 @@ def _by_seqlen(rows) -> None:
             by_kind[r["kind"]].append(r)
     key = "seq_len" if any(r.get("seq_len") is not None
                            for rs in by_kind.values() for r in rs) else "num_tokens"
-    print(f"\n(bucketing by {key})")
+
+    def bucket_of(r):
+        v = r.get(key)
+        if v is None:
+            return None
+        return (v // bin_width) * bin_width if bin_width else v
+
+    label = f"{key} (bin={bin_width})" if bin_width else key
+    print(f"\n(bucketing by {label})")
     for kind in kinds:
         recs = by_kind.get(kind)
         if not recs:
             continue
         buckets = defaultdict(list)
         for r in recs:
-            buckets[r.get(key)].append(r["ms"])
+            buckets[bucket_of(r)].append(r["ms"])
         print(f"\n[by seqlen] {kind} (ms):")
         for nt in sorted(buckets, key=lambda x: (x is None, x)):
             ms = buckets[nt]
-            print(f"    {key}={str(nt):<8} n={len(ms):>7} avg={_mean(ms):.4f} ms")
+            tag = (f"{nt}-{nt + bin_width - 1}" if bin_width and nt is not None
+                   else str(nt))
+            print(f"    {key}={tag:<12} n={len(ms):>7} avg={_mean(ms):.4f} ms")
 
 
 def summarize(path: str, phase: str | None = None, skip: int | None = None,
-              by_seqlen: bool = False) -> None:
+              by_seqlen: bool = False, bin_width: int | None = None) -> None:
     if skip is None:
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
@@ -104,7 +115,7 @@ def summarize(path: str, phase: str | None = None, skip: int | None = None,
         print(f"(filtered to batch_type == {phase!r}: {len(rows)} records)")
 
     if by_seqlen:
-        _by_seqlen(rows)
+        _by_seqlen(rows, bin_width=bin_width)
         return
 
     if not rows:
@@ -302,11 +313,14 @@ if __name__ == "__main__":
     phase = None
     skip = None  # None -> default fixed skip
     by_seqlen = "--by-seqlen" in argv
+    bin_width = None
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]
         elif a.startswith("--skip="):
             skip = int(a.split("=", 1)[1])
+        elif a.startswith("--bin="):
+            bin_width = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
     summarize(pos[0] if pos else "./vllm_prof_out", phase=phase, skip=skip,
-              by_seqlen=by_seqlen)
+              by_seqlen=by_seqlen, bin_width=bin_width)
