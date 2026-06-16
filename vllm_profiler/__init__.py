@@ -68,6 +68,12 @@ def enable(*categories: str, comm: bool = True) -> dict[str, list[str]]:
     if patched:
         get_recorder()  # create sink + register atexit
         atexit.register(flush)
+        # Log patched targets so you can confirm the addon is live in the worker
+        # (e.g. that execute_model -- which stamps batch_type/seq_len -- is hooked).
+        import sys
+        flat = [t for ts in patched.values() for t in ts]
+        print(f"[vllm_profiler] enabled {sorted(cats)} -> patched: {flat}",
+              file=sys.stderr, flush=True)
     return patched
 
 
