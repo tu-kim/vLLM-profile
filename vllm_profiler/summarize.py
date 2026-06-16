@@ -53,25 +53,31 @@ def _p(label, val, unit=""):
 
 
 def _by_seqlen(rows) -> None:
-    """Bucket key timing metrics by num_tokens (= prefill seq length with
-    max-num-seqs 1) for a seq-length sweep. moe_dispatch/combine num_tokens is
-    post-TP-chunk (L/TP); attn_total / moe_total are the full seq length."""
+    """Bucket key timing metrics by sequence length for a length sweep.
+
+    Buckets on ``seq_len`` (total sequence length = context + this step's
+    tokens, set per forward) so it works for BOTH prefill (length = prompt len)
+    and decode (length = context + 1). Falls back to num_tokens if seq_len is
+    absent."""
     kinds = ["attn_total", "moe_total", "moe_dispatch", "moe_combine"]
     by_kind = defaultdict(list)
     for r in rows:
         if r.get("kind") in kinds and r.get("ms") is not None:
             by_kind[r["kind"]].append(r)
+    key = "seq_len" if any(r.get("seq_len") is not None
+                           for rs in by_kind.values() for r in rs) else "num_tokens"
+    print(f"\n(bucketing by {key})")
     for kind in kinds:
         recs = by_kind.get(kind)
         if not recs:
             continue
         buckets = defaultdict(list)
         for r in recs:
-            buckets[r.get("num_tokens")].append(r["ms"])
+            buckets[r.get(key)].append(r["ms"])
         print(f"\n[by seqlen] {kind} (ms):")
         for nt in sorted(buckets, key=lambda x: (x is None, x)):
             ms = buckets[nt]
-            print(f"    num_tokens={str(nt):<8} n={len(ms):>7} avg={_mean(ms):.4f} ms")
+            print(f"    {key}={str(nt):<8} n={len(ms):>7} avg={_mean(ms):.4f} ms")
 
 
 def summarize(path: str, phase: str | None = None, skip: int | None = None,

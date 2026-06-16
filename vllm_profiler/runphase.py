@@ -13,9 +13,34 @@ from __future__ import annotations
 
 from typing import Any
 
-from .recorder import set_batch_type
+from .recorder import set_batch_type, set_seq_len
 
 _originals: dict[str, Any] = {}
+
+
+def _seq_len(scheduler_output: Any) -> int | None:
+    """Max total sequence length (computed context + this step's tokens) across
+    requests. With max-num-seqs 1 this is the single sequence's length, the
+    unified length axis for prefill (prompt len) and decode (context+1)."""
+    try:
+        nst = getattr(scheduler_output, "num_scheduled_tokens", None) or {}
+        if not nst:
+            return None
+        computed: dict[str, int] = {}
+        cached = getattr(scheduler_output, "scheduled_cached_reqs", None)
+        if cached is not None:
+            ids = getattr(cached, "req_ids", None)
+            nct = getattr(cached, "num_computed_tokens", None)
+            if ids and nct:
+                computed.update(zip(ids, nct))
+        for r in getattr(scheduler_output, "scheduled_new_reqs", []) or []:
+            rid = getattr(r, "req_id", None)
+            if rid is not None:
+                computed[rid] = getattr(r, "num_computed_tokens", 0)
+        best = max(computed.get(rid, 0) + sched for rid, sched in nst.items())
+        return int(best) or None
+    except Exception:
+        return None
 
 
 def _classify(runner: Any, scheduler_output: Any) -> str | None:
@@ -52,10 +77,12 @@ def install() -> list[str]:
 
     def execute_model(self, scheduler_output, *args, **kwargs):
         set_batch_type(_classify(self, scheduler_output))
+        set_seq_len(_seq_len(scheduler_output))
         try:
             return orig_exec(self, scheduler_output, *args, **kwargs)
         finally:
             set_batch_type(None)
+            set_seq_len(None)
 
     _originals["execute_model"] = orig_exec
     GPUModelRunner.execute_model = execute_model

@@ -46,10 +46,25 @@ def current_batch_type() -> str | None:
     return _batch_type
 
 
+# Representative total sequence length (context + this step's tokens) of the
+# active request, set per forward by the execute_model wrapper. With
+# max-num-seqs 1 this is exact and is the length axis for both prefill (= prompt
+# length) and decode (= context length + 1).
+_seq_len: int | None = None
+
+
+def set_seq_len(n: int | None) -> None:
+    global _seq_len
+    _seq_len = n
+
+
 def stamp_tags(d: dict) -> dict:
-    """Stamp the current batch phase, captured now (deferred records emit later)."""
+    """Stamp current batch phase + seq length, captured now (deferred records
+    emit later, so the value must be read at capture time)."""
     if _batch_type is not None:
         d.setdefault("batch_type", _batch_type)
+    if _seq_len is not None:
+        d.setdefault("seq_len", _seq_len)
     return d
 
 
