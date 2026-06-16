@@ -88,7 +88,8 @@ python -m vllm_profiler.summarize ./vllm_prof_out
 | `VLLM_PROFILER` | (없음) | `moe,attn` 등 자동 활성화 |
 | `VLLM_PROFILER_DIR` | `./vllm_prof_out` | 출력 디렉터리 |
 | `VLLM_PROFILER_COMM` | `1` | attn의 TP all-reduce 통신 타이밍 on/off |
-| `VLLM_PROFILER_FLUSH_EVERY` | `256` | 레코드 버퍼 flush 주기 |
+| `VLLM_PROFILER_FLUSH_EVERY` | `64` | 디스크 쓰기 주기 (레코드 N개마다). 낮을수록 데이터 신선/내구성↑, sync 없음(저비용) |
+| `VLLM_PROFILER_RESOLVE_EVERY` | `128` | CUDA event resolve 주기 (= `synchronize()` 지점). 낮을수록 타이밍 ms가 더 자주 생성되나 sync 잦아져 오버헤드↑ |
 
 ## 비활성화
 ```python

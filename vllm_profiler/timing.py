@@ -13,6 +13,7 @@ On a CUDA-less box (the dev machine) we transparently fall back to
 
 from __future__ import annotations
 
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,7 +39,9 @@ class _Pending:
 
 _PENDING: list[_Pending] = []
 # Resolve in batches so the pending list (and its CUDA events) stay bounded.
-_RESOLVE_EVERY = 512
+# Lower -> timing (ms) records land sooner & on-disk data is fresher, at the
+# cost of more frequent cuda.synchronize() (higher measurement overhead).
+_RESOLVE_EVERY = int(os.environ.get("VLLM_PROFILER_RESOLVE_EVERY", "128"))
 
 # Extra resolvers (e.g. MoE histogram buffers) that also need the post-sync
 # window to move GPU tensors to host without paying a per-call synchronize.
