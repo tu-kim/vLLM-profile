@@ -381,10 +381,24 @@ def _wrap_finalize(orig):
     return _finalize
 
 
+# Module-scoped layer index (separate from the kernel-impl index used by
+# moe_call), so moe_total layers are numbered 0..N-1 over MoE modules.
+_module_ids: dict[int, int] = {}
+
+
+def _module_idx(obj: Any) -> int:
+    key = id(obj)
+    idx = _module_ids.get(key)
+    if idx is None:
+        idx = len(_module_ids)
+        _module_ids[key] = idx
+    return idx
+
+
 def _wrap_moe_module_forward(orig):
-    """Capture the *pre-chunk* token count at the MoE-module boundary so the
-    moe_call hook (which only sees post-chunk tokens) can compute the
-    sequence-parallel padding overhead."""
+    """Time the *whole* MoE layer (gate + dispatch + experts + combine + shared
+    experts + all-reduce) as ``moe_total`` -- the analogue of attn_total -- and
+    capture the pre-chunk token count for the sequence-parallel padding metric."""
     def forward(self, hidden_states, *args, **kwargs):
         is_sp = bool(getattr(self, "is_sequence_parallel", False))
         prev = getattr(_ctx, "sp", None)
@@ -394,7 +408,9 @@ def _wrap_moe_module_forward(orig):
             tokens_before = -1
         _ctx.sp = {"is_sequence_parallel": is_sp, "tokens_before_chunk": tokens_before}
         try:
-            return orig(self, hidden_states, *args, **kwargs)
+            with Region("moe_total", moe_layer=_module_idx(self),
+                        num_tokens=tokens_before):
+                return orig(self, hidden_states, *args, **kwargs)
         finally:
             _ctx.sp = prev
 

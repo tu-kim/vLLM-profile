@@ -84,6 +84,18 @@ def summarize(path: str, phase: str | None = None, skip: int | None = None) -> N
     print(f"\n=== vllm_profiler summary: {path} "
           f"({len(rows)} records, {len({r['rank'] for r in rows})} ranks) ===")
 
+    # ---- MoE: total time (full MoE layer, analogue of attn_total) ----
+    mt = by_kind.get("moe_total", [])
+    if mt:
+        print("\n[MoE] total time (full MoE layer):")
+        _p("avg moe_total", _mean([r.get("ms") for r in mt]), "ms")
+        by_bt = defaultdict(list)
+        for r in mt:
+            by_bt[r.get("batch_type") or "all"].append(r.get("ms"))
+        if len(by_bt) > 1 or "all" not in by_bt:
+            for bt, ms in sorted(by_bt.items()):
+                print(f"    {bt:<12} calls={len(ms):>6} avg={_mean(ms):.4f} ms")
+
     # ---- MoE: transfer method (item 2) ----
     calls = by_kind.get("moe_call", [])
     if calls:
