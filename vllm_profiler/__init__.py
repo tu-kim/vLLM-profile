@@ -26,7 +26,7 @@ from __future__ import annotations
 import atexit
 import os
 
-from . import attn_hooks, moe_hooks, timing
+from . import attn_hooks, moe_hooks, runphase, timing
 from .recorder import get_recorder
 
 _ENABLED: set[str] = set()
@@ -55,6 +55,10 @@ def enable(*categories: str, comm: bool = True) -> dict[str, list[str]]:
     """
     cats = {_ALIASES.get(c.lower(), c.lower()) for c in categories} or {"moe", "attn"}
     patched: dict[str, list[str]] = {}
+    # Always guard run phase so warmup/dummy records get tagged & filterable.
+    if "phase" not in _ENABLED:
+        patched["phase"] = runphase.install()
+        _ENABLED.add("phase")
     if "moe" in cats and "moe" not in _ENABLED:
         patched["moe"] = moe_hooks.install()
         _ENABLED.add("moe")
@@ -78,6 +82,7 @@ def disable() -> None:
     flush()
     moe_hooks.uninstall()
     attn_hooks.uninstall()
+    runphase.uninstall()
     _ENABLED.clear()
 
 

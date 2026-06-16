@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
 
 from . import timing
-from .recorder import get_recorder
+from .recorder import get_recorder, in_dummy
 from .timing import Region, nbytes, register_resolver
 
 # --- per-MoE-call context (thread-local so _prepare/_finalize can find it) ----
@@ -158,6 +158,9 @@ class _DeferredBuffer:
         register_resolver(self.drain)
 
     def add(self, kind: str, field: str, meta: dict, tensor: Any) -> None:
+        # Capture run phase now; this buffer drains at flush time.
+        if in_dummy() and "dummy" not in meta:
+            meta = {**meta, "dummy": True}
         self._pending.append((kind, field, meta, tensor))
 
     def drain(self) -> None:
@@ -167,7 +170,48 @@ class _DeferredBuffer:
         pending, self._pending = self._pending, []
         for kind, field, meta, tensor in pending:
             vals = tensor.tolist() if hasattr(tensor, "tolist") else list(tensor)
-            rec.record(kind, **{field: vals}, **meta)
+            extra = {}
+            if kind == "moe_expert_load":
+                # Per-batch load-imbalance metrics, computed on host (cheap).
+                extra = _load_imbalance(vals, meta.get("experts_per_rank"))
+            rec.record(kind, **{field: vals}, **extra, **meta)
+
+
+def _load_imbalance(counts: list[int], experts_per_rank: int | None = None) -> dict:
+    """Per-batch token load-imbalance metrics over the routed-expert histogram.
+
+    Expert level (across all global experts) and -- if ``experts_per_rank`` is
+    known -- EP-rank level (experts grouped into contiguous rank blocks, since
+    the slowest rank gates the whole MoE step).
+
+    Returns CoV (std/mean) and max/mean ("hot expert/rank" factor); higher =
+    more imbalanced. A perfectly balanced batch has CoV=0, max/mean=1.
+    """
+    n = len(counts)
+    tot = sum(counts)
+    if n == 0 or tot == 0:
+        return {"total_routes": tot, "n_experts": n}
+    mean = tot / n
+    var = sum((c - mean) ** 2 for c in counts) / n
+    out = {
+        "total_routes": tot,
+        "n_experts": n,
+        "max_over_mean": round(max(counts) / mean, 4),
+        "min_over_mean": round(min(counts) / mean, 4),
+        "cov": round((var ** 0.5) / mean, 4),
+    }
+    if experts_per_rank and experts_per_rank > 0 and n % experts_per_rank == 0:
+        ranks = [sum(counts[i:i + experts_per_rank])
+                 for i in range(0, n, experts_per_rank)]
+        R = len(ranks)
+        rmean = tot / R
+        rvar = sum((x - rmean) ** 2 for x in ranks) / R
+        out.update(
+            n_ep_ranks=R,
+            rank_max_over_mean=round(max(ranks) / rmean, 4),
+            rank_cov=round((rvar ** 0.5) / rmean, 4),
+        )
+    return out
 
 
 _buf: _DeferredBuffer | None = None
@@ -214,7 +258,9 @@ def _wrap_apply(orig):
         topk_ids = _arg(args, kwargs, 3, "topk_ids")
         topk_weights = _arg(args, kwargs, 4, "topk_weights")
         hidden_states = _arg(args, kwargs, 0, "hidden_states")
+        w1 = _arg(args, kwargs, 1, "w1")
         gne = _arg(args, kwargs, 6, "global_num_experts", -1)
+        local_ne = int(w1.shape[0]) if w1 is not None and hasattr(w1, "shape") else None
 
         seq = _call_seq
         _call_seq += 1
@@ -246,8 +292,9 @@ def _wrap_apply(orig):
 
         get_recorder().record("moe_call", **meta, **method, **pad)
 
-        # Item 3: expert load balance.
-        _record_load_balance(topk_ids, int(gne), {"moe_layer": layer, "call_seq": seq})
+        # Item 3: expert load balance + per-batch imbalance metrics.
+        _record_load_balance(topk_ids, int(gne), {
+            "moe_layer": layer, "call_seq": seq, "experts_per_rank": local_ne})
 
         # Expose context so the _prepare / _finalize wrappers can tag their
         # transfer-size records to this exact call.

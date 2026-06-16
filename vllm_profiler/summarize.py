@@ -40,10 +40,22 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def summarize(path: str) -> None:
+def summarize(path: str, include_dummy: bool = False) -> None:
     rows = _load(path)
     if not rows:
         print(f"No records found under {path!r}")
+        return
+    # Drop warmup/dummy-run records (memory profiling, cudagraph capture, DP
+    # idle-rank lockstep) unless explicitly asked to keep them.
+    n_dummy = sum(1 for r in rows if r.get("dummy"))
+    if not include_dummy:
+        rows = [r for r in rows if not r.get("dummy")]
+    if n_dummy:
+        kept = "kept" if include_dummy else "dropped"
+        print(f"(note: {n_dummy} dummy/warmup records {kept}; "
+              f"pass --include-dummy to keep)")
+    if not rows:
+        print("No real-inference records left after dropping dummy/warmup.")
         return
     by_kind = defaultdict(list)
     for r in rows:
@@ -125,8 +137,30 @@ def summarize(path: str) -> None:
         if by_kind.get(k):
             _p(f"avg {name} time", _mean([r.get("ms") for r in by_kind[k]]), "ms")
 
-    # ---- MoE: expert load balance (item 3) ----
+    # ---- MoE: per-batch load imbalance (item 3) ----
     loads = by_kind.get("moe_expert_load", [])
+    batched = [l for l in loads if l.get("cov") is not None]
+    if batched:
+        covs = [l["cov"] for l in batched]
+        moms = [l["max_over_mean"] for l in batched]
+        print("\n[MoE] per-batch load imbalance (item 3):")
+        _p("batches measured", len(batched), "")
+        _p("avg expert CoV", _mean(covs))
+        _p("worst-batch expert CoV", max(covs))
+        _p("avg expert max/mean", _mean(moms))
+        _p("worst-batch expert max/mean", max(moms))
+        rcov = [l["rank_cov"] for l in batched if l.get("rank_cov") is not None]
+        rmom = [l["rank_max_over_mean"] for l in batched
+                if l.get("rank_max_over_mean") is not None]
+        if rcov:
+            ranks_n = batched[0].get("n_ep_ranks")
+            print(f"    -- EP-rank level (across {ranks_n} ranks; slowest gates the step) --")
+            _p("avg rank CoV", _mean(rcov))
+            _p("worst-batch rank CoV", max(rcov))
+            _p("avg rank max/mean", _mean(rmom))
+            _p("worst-batch rank max/mean", max(rmom))
+
+    # ---- MoE: expert load balance aggregate (item 3) ----
     if loads:
         per_layer = defaultdict(lambda: None)
         for l in loads:
@@ -199,4 +233,7 @@ def summarize(path: str) -> None:
 
 
 if __name__ == "__main__":
-    summarize(sys.argv[1] if len(sys.argv) > 1 else "./vllm_prof_out")
+    argv = [a for a in sys.argv[1:]]
+    include_dummy = "--include-dummy" in argv
+    argv = [a for a in argv if not a.startswith("--")]
+    summarize(argv[0] if argv else "./vllm_prof_out", include_dummy=include_dummy)

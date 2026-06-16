@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
     _CUDA = False
 
-from .recorder import get_recorder
+from .recorder import get_recorder, in_dummy
 
 
 @dataclass
@@ -71,6 +71,10 @@ class Region:
     __slots__ = ("kind", "fields", "_start", "_end")
 
     def __init__(self, kind: str, **fields: Any) -> None:
+        # Timing records are emitted later (at resolve), so capture the run
+        # phase now, while the actual forward is running.
+        if in_dummy():
+            fields.setdefault("dummy", True)
         self.kind = kind
         self.fields = fields
 
@@ -96,10 +100,13 @@ class Region:
 
 
 def resolve_pending() -> None:
-    """Synchronize once and emit a timing record for every pending region."""
-    if not _PENDING:
-        return
-    if _CUDA:
+    """Synchronize once and emit a timing record for every pending region, then
+    run extra resolvers (deferred GPU->host buffers).
+
+    Resolvers run even when there are no pending timing regions, so buffered
+    histograms are never silently dropped.
+    """
+    if _PENDING and _CUDA:
         torch.cuda.synchronize()
         rec = get_recorder()
         for p in _PENDING:

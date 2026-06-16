@@ -28,6 +28,31 @@ except Exception:  # pragma: no cover - import guard
 
 _FLUSH_EVERY = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "1024"))
 
+# --- run-phase tracking -------------------------------------------------------
+# vLLM runs many dummy/warmup/cudagraph-capture/DP-lockstep forward passes during
+# initialization (all via GPUModelRunner._dummy_run). Those fire our hooks too.
+# We track a depth counter while inside a dummy run so records can be tagged
+# `dummy: True` and filtered out, leaving only real inference data.
+_dummy_depth = 0
+_dummy_lock = threading.Lock()
+
+
+def enter_dummy() -> None:
+    global _dummy_depth
+    with _dummy_lock:
+        _dummy_depth += 1
+
+
+def exit_dummy() -> None:
+    global _dummy_depth
+    with _dummy_lock:
+        if _dummy_depth > 0:
+            _dummy_depth -= 1
+
+
+def in_dummy() -> bool:
+    return _dummy_depth > 0
+
 
 def _detect_rank() -> int:
     """Best-effort global rank detection without forcing torch.distributed init."""
@@ -64,6 +89,10 @@ class Recorder:
 
     def record(self, kind: str, **fields: Any) -> None:
         rec = {"kind": kind, "rank": self.rank, "t_wall": time.time(), **fields}
+        # Tag records produced during a dummy/warmup run (unless the caller
+        # already stamped it at capture time -- see Region / _DeferredBuffer).
+        if _dummy_depth > 0:
+            rec.setdefault("dummy", True)
         line = json.dumps(rec, default=_jsonable)
         with self._lock:
             if self._closed:

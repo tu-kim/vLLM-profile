@@ -44,8 +44,14 @@ VLLM_PROFILER=moe,attn  vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
 
 ### 3) 결과 요약
 ```bash
-python -m vllm_profiler.summarize ./vllm_prof_out
+python -m vllm_profiler.summarize ./vllm_prof_out            # 실데이터만 (dummy 제외)
+python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy  # warmup까지 포함
 ```
+
+**Warmup/dummy 자동 분리:** vLLM 초기화 단계의 dummy forward(메모리 프로파일링,
+CUDA graph 캡처, DP idle-rank lockstep)는 모두 `GPUModelRunner._dummy_run`을
+통과합니다. 이 구간에서 찍힌 레코드에는 `dummy: True`가 태깅되고, summarize가
+**기본적으로 제외**합니다. 실제 추론(`execute_model` 경로)만 남습니다.
 
 ## 측정 항목 → 구현 매핑
 
@@ -55,7 +61,7 @@ python -m vllm_profiler.summarize ./vllm_prof_out
 | ① Dispatch/Combine 토큰별 전송 사이즈 + **batch된 토큰 수** | `moe_dispatch_size`, `moe_dispatch_tokens`, `moe_combine_size`, `moe_dispatch`/`moe_combine`(ms) | `bytes_in`/`bytes_recv`/`bytes_out`, `per_token_bytes`, `tokens_in`, `routing_slots_sent`(=tok×topk), `tokens_recv`(Standard) 또는 `n_local_experts`/`max_tokens_per_expert`/`tokens_recv_padded`(BatchedExperts), `expert_num_tokens`(expert별 실제 토큰 수) |
 | ② 토큰 전송 방식 (배치 묶음 vs 개별) | `moe_call` | `pf_class`, `act_format`, `grouping` |
 | ②-b Sequence-parallel **청크 패딩 오버헤드** | `moe_call` (sp 필드) | `is_sequence_parallel`, `tokens_before_chunk`, `tp_size`, `padded_len`, `pad_total`, `chunk_tokens`, `pad_tokens_this_rank` |
-| ③ Expert 부하 분포 (토큰별 routing) | `moe_expert_load` | `counts`(expert별 routing 횟수) |
+| ③ Expert 부하 분포 (토큰별 routing) + **배치별 불균형** | `moe_expert_load` | `counts`(expert별 routing 횟수), 배치별: `cov`/`max_over_mean`(expert 단위), `rank_cov`/`rank_max_over_mean`(EP-rank 단위, 가장 느린 rank가 step을 좌우) |
 
 - **②의 해석**: `grouping` 값
   - `batched_grouped_by_rank` → DeepEP HT / pplx: 목적지 rank별로 토큰을 **한 버퍼에 묶어** all-to-all (배치 전송)
