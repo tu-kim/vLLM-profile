@@ -17,17 +17,24 @@ import sys
 from collections import defaultdict
 
 
-def _load(path: str):
+def _load(path: str, skip: int = 0):
+    """Load all rank files. ``skip`` drops the first N non-empty lines *per file*
+    (init/warmup records are written first in each rank's file)."""
     rows = []
     for fp in sorted(glob.glob(os.path.join(path, "prof_rank*.jsonl"))):
+        n = 0
         with open(fp) as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    try:
-                        rows.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
+                if not line:
+                    continue
+                n += 1
+                if n <= skip:
+                    continue
+                try:
+                    rows.append(json.loads(line))
+                except json.JSONDecodeError:
+                    pass
     return rows
 
 
@@ -40,11 +47,15 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def summarize(path: str, include_dummy: bool = False, phase: str | None = None) -> None:
-    rows = _load(path)
+def summarize(path: str, include_dummy: bool = False, phase: str | None = None,
+              skip: int = 0) -> None:
+    rows = _load(path, skip=skip)
     if not rows:
-        print(f"No records found under {path!r}")
+        print(f"No records found under {path!r}" +
+              (f" (after skipping first {skip} lines/file)" if skip else ""))
         return
+    if skip:
+        print(f"(skipped first {skip} lines per rank file)")
     # Drop warmup/dummy-run records (memory profiling, cudagraph capture, DP
     # idle-rank lockstep) unless explicitly asked to keep them.
     n_dummy = sum(1 for r in rows if r.get("dummy"))
@@ -248,9 +259,12 @@ if __name__ == "__main__":
     argv = list(sys.argv[1:])
     include_dummy = "--include-dummy" in argv
     phase = None
+    skip = 0
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]
+        elif a.startswith("--skip="):
+            skip = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
     summarize(pos[0] if pos else "./vllm_prof_out",
-              include_dummy=include_dummy, phase=phase)
+              include_dummy=include_dummy, phase=phase, skip=skip)

@@ -48,7 +48,12 @@ python -m vllm_profiler.summarize ./vllm_prof_out             # 실데이터만 
 python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy   # warmup 포함
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
+python -m vllm_profiler.summarize ./vllm_prof_out --skip=15000      # 각 rank 파일 앞 15000줄 제외
 ```
+
+**`--skip=N` (blunt 폴백):** init/warmup 레코드는 각 rank 파일 **앞쪽**에 모여 있으므로,
+태깅 필터로 안 잡히는 잔여 init 이벤트가 있으면 **파일별 앞 N줄을 고정 제외**하고 평균낼
+수 있습니다. (rank 여러 개를 합쳐도 파일마다 앞 N줄을 버림.) dummy 태깅 필터와 함께 적용됩니다.
 
 **Warmup/init 자동 분리:** **첫 실제 추론(`execute_model`) 이전의 모든 이벤트는
 init/warmup으로 간주**되어 `dummy: True`로 태깅됩니다 — 메모리 프로파일링,
