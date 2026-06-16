@@ -16,6 +16,11 @@ import os
 import sys
 from collections import defaultdict
 
+# By default skip the first flush-batch worth of records per rank file: the
+# opening buffer tends to straddle init/warmup, so dropping ~one flush gives a
+# clean steady-state average. Same env key as the recorder's flush size.
+_DEFAULT_SKIP = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "1024"))
+
 
 def _load(path: str, skip: int = 0):
     """Load all rank files. ``skip`` drops the first N non-empty lines *per file*
@@ -48,14 +53,17 @@ def _p(label, val, unit=""):
 
 
 def summarize(path: str, include_dummy: bool = False, phase: str | None = None,
-              skip: int = 0) -> None:
+              skip: int | None = None) -> None:
+    if skip is None:
+        skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
     if not rows:
         print(f"No records found under {path!r}" +
               (f" (after skipping first {skip} lines/file)" if skip else ""))
         return
     if skip:
-        print(f"(skipped first {skip} lines per rank file)")
+        print(f"(skipped first {skip} lines per rank file ~= one flush; "
+              f"--skip=0 to keep)")
     # Drop warmup/dummy-run records (memory profiling, cudagraph capture, DP
     # idle-rank lockstep) unless explicitly asked to keep them.
     n_dummy = sum(1 for r in rows if r.get("dummy"))
@@ -259,7 +267,7 @@ if __name__ == "__main__":
     argv = list(sys.argv[1:])
     include_dummy = "--include-dummy" in argv
     phase = None
-    skip = 0
+    skip = None  # None -> default (one flush worth)
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]

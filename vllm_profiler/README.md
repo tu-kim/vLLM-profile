@@ -44,16 +44,19 @@ VLLM_PROFILER=moe,attn  vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
 
 ### 3) 결과 요약
 ```bash
-python -m vllm_profiler.summarize ./vllm_prof_out             # 실데이터만 (dummy 제외)
+python -m vllm_profiler.summarize ./vllm_prof_out             # 기본: dummy 제외 + 앞 1 flush분 스킵
+python -m vllm_profiler.summarize ./vllm_prof_out --skip=0          # 스킵 없이 (dummy만 제외)
 python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy   # warmup 포함
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
-python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
-python -m vllm_profiler.summarize ./vllm_prof_out --skip=15000      # 각 rank 파일 앞 15000줄 제외
+python -m vllm_profiler.summarize ./vllm_prof_out --skip=15000      # 앞 15000줄 제외
 ```
 
-**`--skip=N` (blunt 폴백):** init/warmup 레코드는 각 rank 파일 **앞쪽**에 모여 있으므로,
-태깅 필터로 안 잡히는 잔여 init 이벤트가 있으면 **파일별 앞 N줄을 고정 제외**하고 평균낼
-수 있습니다. (rank 여러 개를 합쳐도 파일마다 앞 N줄을 버림.) dummy 태깅 필터와 함께 적용됩니다.
+**기본 동작 = dummy 제외 + 앞 "한 flush 분량" 스킵.** init/warmup 레코드는 각 rank 파일
+**앞쪽**에 모여 있어, 첫 flush 버퍼가 init/warmup과 겹치기 쉽습니다. 그래서 기본적으로
+**파일별 앞 `FLUSH_EVERY`(기본 1024)줄을 제외**하고 steady-state로 평균냅니다.
+- `--skip=N` 으로 줄 수 직접 지정, `--skip=0` 으로 스킵 해제.
+- 스킵 기준값은 `VLLM_PROFILER_FLUSH_EVERY`(recorder의 flush 크기)와 동일 env를 따릅니다.
+- dummy 태깅 필터와 **함께** 적용됩니다 (skip 후 dummy도 추가 제외).
 
 **Warmup/init 자동 분리:** **첫 실제 추론(`execute_model`) 이전의 모든 이벤트는
 init/warmup으로 간주**되어 `dummy: True`로 태깅됩니다 — 메모리 프로파일링,
