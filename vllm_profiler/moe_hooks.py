@@ -65,6 +65,60 @@ def _arg(args: tuple, kwargs: dict, pos: int, name: str, default=None):
     return default
 
 
+# --- sequence-parallel (TP) chunk padding ------------------------------------
+_tp_cache: dict[str, int] = {}
+
+
+def _tp_info() -> tuple[int, int]:
+    """(tp_size, tp_rank) of the TP group used by sequence_parallel_chunk.
+
+    sequence_parallel_chunk_impl pads to a multiple of the *tensor* parallel
+    world size and gives each TP rank one chunk, so these are the right axes for
+    padding accounting.
+    """
+    if "size" not in _tp_cache:
+        try:
+            from vllm.distributed import (
+                get_tensor_model_parallel_rank,
+                get_tensor_model_parallel_world_size,
+            )
+
+            _tp_cache["size"] = int(get_tensor_model_parallel_world_size())
+            _tp_cache["rank"] = int(get_tensor_model_parallel_rank())
+        except Exception:
+            _tp_cache["size"] = 1
+            _tp_cache["rank"] = 0
+    return _tp_cache["size"], _tp_cache["rank"]
+
+
+def _chunk_padding(tokens_before: int) -> dict[str, Any]:
+    """Reproduce sequence_parallel_chunk_impl's padding math and attribute the
+    padded (wasted) tokens to this rank.
+
+    3 tokens, TP=2  ->  pad to 4  ->  chunk=2 per rank; row3 (pad) lands on rank1.
+    """
+    tp, r = _tp_info()
+    if tp <= 1 or tokens_before <= 0:
+        return {"tokens_before_chunk": tokens_before, "tp_size": tp,
+                "padded_len": tokens_before, "pad_total": 0,
+                "chunk_tokens": tokens_before, "pad_tokens_this_rank": 0}
+    rem = tokens_before % tp
+    padded = tokens_before + (tp - rem) % tp
+    chunk = padded // tp
+    # padding rows are the last (padded - tokens_before) rows; this rank owns
+    # rows [r*chunk, (r+1)*chunk).
+    lo, hi = r * chunk, (r + 1) * chunk
+    pad_this = max(0, min(hi, padded) - max(lo, tokens_before))
+    return {
+        "tokens_before_chunk": tokens_before,
+        "tp_size": tp,
+        "padded_len": padded,
+        "pad_total": padded - tokens_before,
+        "chunk_tokens": chunk,
+        "pad_tokens_this_rank": pad_this,
+    }
+
+
 # --- transfer method classification -------------------------------------------
 def _transfer_method(pf: Any) -> dict[str, Any]:
     """Describe how a prepare/finalize object moves tokens between EP ranks."""
@@ -181,7 +235,16 @@ def _wrap_apply(orig):
         # Item 2: how are tokens transferred? (class + activation format)
         pf = getattr(self, "prepare_finalize", None)
         method = _transfer_method(pf) if pf is not None else {}
-        get_recorder().record("moe_call", **meta, **method)
+
+        # Sequence-parallel chunk padding: link the pre-chunk token count
+        # captured at the DeepseekV2MoE.forward boundary, if present.
+        sp = getattr(_ctx, "sp", None)
+        pad = {}
+        if sp is not None and sp.get("is_sequence_parallel"):
+            pad = _chunk_padding(int(sp.get("tokens_before_chunk", num_tokens)))
+            pad["is_sequence_parallel"] = True
+
+        get_recorder().record("moe_call", **meta, **method, **pad)
 
         # Item 3: expert load balance.
         _record_load_balance(topk_ids, int(gne), {"moe_layer": layer, "call_seq": seq})
@@ -272,6 +335,26 @@ def _wrap_finalize(orig):
     return _finalize
 
 
+def _wrap_moe_module_forward(orig):
+    """Capture the *pre-chunk* token count at the MoE-module boundary so the
+    moe_call hook (which only sees post-chunk tokens) can compute the
+    sequence-parallel padding overhead."""
+    def forward(self, hidden_states, *args, **kwargs):
+        is_sp = bool(getattr(self, "is_sequence_parallel", False))
+        prev = getattr(_ctx, "sp", None)
+        try:
+            tokens_before = int(hidden_states.shape[0])
+        except Exception:
+            tokens_before = -1
+        _ctx.sp = {"is_sequence_parallel": is_sp, "tokens_before_chunk": tokens_before}
+        try:
+            return orig(self, hidden_states, *args, **kwargs)
+        finally:
+            _ctx.sp = prev
+
+    return forward
+
+
 def install() -> list[str]:
     """Monkey-patch the modular MoE kernel.  Returns list of patched targets."""
     global _buf
@@ -293,6 +376,17 @@ def install() -> list[str]:
         _originals[name] = orig
         setattr(cls, name, wrapper(orig))
         patched.append(f"FusedMoEKernelModularImpl.{name}")
+
+    # MoE module boundary (pre-chunk tokens) for padding overhead. DeepSeek V3
+    # uses DeepseekV2MoE; other MoE models can be added the same way.
+    try:
+        from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
+        if "deepseek_moe_forward" not in _originals:
+            _originals["deepseek_moe_forward"] = DeepseekV2MoE.forward
+            DeepseekV2MoE.forward = _wrap_moe_module_forward(DeepseekV2MoE.forward)
+            patched.append("DeepseekV2MoE.forward")
+    except Exception:
+        pass
     return patched
 
 
@@ -302,6 +396,13 @@ def uninstall() -> None:
     from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 
     cls = mk.FusedMoEKernelModularImpl
-    for name, orig in _originals.items():
-        setattr(cls, name, orig)
+    for name in ("apply", "_prepare", "_finalize"):
+        if name in _originals:
+            setattr(cls, name, _originals.pop(name))
+    if "deepseek_moe_forward" in _originals:
+        try:
+            from vllm.model_executor.models.deepseek_v2 import DeepseekV2MoE
+            DeepseekV2MoE.forward = _originals.pop("deepseek_moe_forward")
+        except Exception:
+            pass
     _originals.clear()

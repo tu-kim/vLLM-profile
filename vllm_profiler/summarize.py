@@ -62,6 +62,26 @@ def summarize(path: str) -> None:
         for (cls, grp, fmt), n in sorted(methods.items(), key=lambda x: -x[1]):
             print(f"    {n:>6}x  class={cls}  grouping={grp}  act_format={fmt}")
 
+        # Sequence-parallel chunk padding overhead.
+        sp = [c for c in calls if c.get("is_sequence_parallel")]
+        if sp:
+            before = sum(c.get("tokens_before_chunk", 0) for c in sp)
+            padded = sum(c.get("padded_len", 0) for c in sp)
+            pad_tot = sum(c.get("pad_total", 0) for c in sp)
+            pad_here = sum(c.get("pad_tokens_this_rank", 0) for c in sp)
+            chunk_tok = sum(c.get("chunk_tokens", 0) for c in sp)
+            tp = sp[0].get("tp_size")
+            print(f"\n[MoE] sequence-parallel chunk padding (TP={tp}, {len(sp)} calls):")
+            _p("total tokens before chunk", before, "tok")
+            _p("total padded length", padded, "tok")
+            _p("total padding (global)", pad_tot, "tok")
+            if padded:
+                _p("padding overhead (global)", 100.0 * pad_tot / padded, "%")
+            _p("padding tokens on THIS rank", pad_here, "tok")
+            if chunk_tok:
+                _p("padding share of this rank's MoE work",
+                   100.0 * pad_here / chunk_tok, "%")
+
     # ---- MoE: dispatch/combine transfer size (item 1) ----
     disp = by_kind.get("moe_dispatch_size", [])
     comb = by_kind.get("moe_combine_size", [])
