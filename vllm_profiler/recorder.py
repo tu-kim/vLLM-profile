@@ -54,6 +54,46 @@ def in_dummy() -> bool:
     return _dummy_depth > 0
 
 
+# Current batch phase ("prefill" / "decode" / "mixed"), set per forward pass by
+# the execute_model wrapper (runphase.py). None outside a real forward.
+_batch_type: str | None = None
+
+
+def set_batch_type(bt: str | None) -> None:
+    global _batch_type
+    _batch_type = bt
+
+
+def current_batch_type() -> str | None:
+    return _batch_type
+
+
+# Everything before the first *real* execute_model is initialization: weight
+# load, memory profiling, kernel warmup (DeepGEMM / FlashInfer), cudagraph
+# capture. Those fire our hooks from many different code paths, so rather than
+# chase each one we treat the whole pre-serving window as dummy.
+_serving_started = False
+
+
+def mark_serving_started() -> None:
+    global _serving_started
+    _serving_started = True
+
+
+def stamp_tags(d: dict) -> dict:
+    """Add run-phase tags (dummy, batch_type) captured at *this* moment.
+
+    Used at capture time by record()/Region/_DeferredBuffer so deferred records
+    carry the phase that was active when the work actually ran, not at flush.
+    setdefault keeps any tag the caller already stamped.
+    """
+    if _dummy_depth > 0 or not _serving_started:
+        d.setdefault("dummy", True)
+    if _batch_type is not None:
+        d.setdefault("batch_type", _batch_type)
+    return d
+
+
 def _detect_rank() -> int:
     """Best-effort global rank detection without forcing torch.distributed init."""
     if torch is not None:
@@ -89,10 +129,9 @@ class Recorder:
 
     def record(self, kind: str, **fields: Any) -> None:
         rec = {"kind": kind, "rank": self.rank, "t_wall": time.time(), **fields}
-        # Tag records produced during a dummy/warmup run (unless the caller
-        # already stamped it at capture time -- see Region / _DeferredBuffer).
-        if _dummy_depth > 0:
-            rec.setdefault("dummy", True)
+        # Tag with run phase (dummy / prefill-decode) unless the caller already
+        # stamped it at capture time (see Region / _DeferredBuffer).
+        stamp_tags(rec)
         line = json.dumps(rec, default=_jsonable)
         with self._lock:
             if self._closed:

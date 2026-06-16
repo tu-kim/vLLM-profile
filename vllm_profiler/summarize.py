@@ -40,7 +40,7 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def summarize(path: str, include_dummy: bool = False) -> None:
+def summarize(path: str, include_dummy: bool = False, phase: str | None = None) -> None:
     rows = _load(path)
     if not rows:
         print(f"No records found under {path!r}")
@@ -54,8 +54,20 @@ def summarize(path: str, include_dummy: bool = False) -> None:
         kept = "kept" if include_dummy else "dropped"
         print(f"(note: {n_dummy} dummy/warmup records {kept}; "
               f"pass --include-dummy to keep)")
+
+    # Per-forward phase (prefill / decode / mixed) breakdown + optional filter.
+    bt_counts = defaultdict(int)
+    for r in rows:
+        bt_counts[r.get("batch_type") or "unknown"] += 1
+    if any(k != "unknown" for k in bt_counts):
+        print("records by phase: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(bt_counts.items(), key=lambda x: -x[1])))
+    if phase:
+        rows = [r for r in rows if r.get("batch_type") == phase]
+        print(f"(filtered to batch_type == {phase!r}: {len(rows)} records)")
+
     if not rows:
-        print("No real-inference records left after dropping dummy/warmup.")
+        print("No matching records left after filtering.")
         return
     by_kind = defaultdict(list)
     for r in rows:
@@ -233,7 +245,12 @@ def summarize(path: str, include_dummy: bool = False) -> None:
 
 
 if __name__ == "__main__":
-    argv = [a for a in sys.argv[1:]]
+    argv = list(sys.argv[1:])
     include_dummy = "--include-dummy" in argv
-    argv = [a for a in argv if not a.startswith("--")]
-    summarize(argv[0] if argv else "./vllm_prof_out", include_dummy=include_dummy)
+    phase = None
+    for a in argv:
+        if a.startswith("--phase="):
+            phase = a.split("=", 1)[1]
+    pos = [a for a in argv if not a.startswith("--")]
+    summarize(pos[0] if pos else "./vllm_prof_out",
+              include_dummy=include_dummy, phase=phase)

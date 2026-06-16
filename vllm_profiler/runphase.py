@@ -17,9 +17,38 @@ from __future__ import annotations
 
 from typing import Any
 
-from .recorder import enter_dummy, exit_dummy
+from .recorder import (
+    enter_dummy,
+    exit_dummy,
+    mark_serving_started,
+    set_batch_type,
+)
 
 _originals: dict[str, Any] = {}
+
+
+def _classify(runner: Any, scheduler_output: Any) -> str | None:
+    """prefill / decode / mixed for a real forward.
+
+    Uses per-request scheduled token counts. A request scheduled for more than
+    ``uniform_decode_query_len`` tokens (1, or 1+num_spec with spec decoding) is
+    a prefill; otherwise it's a decode. Chunked-prefill batches that mix both
+    are labelled "mixed".
+    """
+    try:
+        nst = getattr(scheduler_output, "num_scheduled_tokens", None)
+        if not nst:
+            return None
+        q = getattr(runner, "uniform_decode_query_len", 1) or 1
+        vals = list(nst.values())
+        n_prefill = sum(1 for v in vals if v > q)
+        if n_prefill == 0:
+            return "decode"
+        if n_prefill == len(vals):
+            return "prefill"
+        return "mixed"
+    except Exception:
+        return None
 
 
 def install() -> list[str]:
@@ -27,28 +56,52 @@ def install() -> list[str]:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except Exception:
         return []
-    if "dummy_run" in _originals:
-        return []
-    orig = GPUModelRunner._dummy_run
+    patched = []
 
-    def _dummy_run(self, *args, **kwargs):
-        enter_dummy()
-        try:
-            return orig(self, *args, **kwargs)
-        finally:
-            exit_dummy()
+    if "dummy_run" not in _originals:
+        orig_dummy = GPUModelRunner._dummy_run
 
-    _originals["dummy_run"] = orig
-    GPUModelRunner._dummy_run = _dummy_run
-    return ["GPUModelRunner._dummy_run"]
+        def _dummy_run(self, *args, **kwargs):
+            enter_dummy()
+            try:
+                return orig_dummy(self, *args, **kwargs)
+            finally:
+                exit_dummy()
+
+        _originals["dummy_run"] = orig_dummy
+        GPUModelRunner._dummy_run = _dummy_run
+        patched.append("GPUModelRunner._dummy_run")
+
+    if "execute_model" not in _originals:
+        orig_exec = GPUModelRunner.execute_model
+
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            bt = _classify(self, scheduler_output)
+            if bt is not None:
+                # First real forward with scheduled work -> serving has begun;
+                # everything captured before this was init/warmup.
+                mark_serving_started()
+            set_batch_type(bt)
+            try:
+                return orig_exec(self, scheduler_output, *args, **kwargs)
+            finally:
+                set_batch_type(None)
+
+        _originals["execute_model"] = orig_exec
+        GPUModelRunner.execute_model = execute_model
+        patched.append("GPUModelRunner.execute_model")
+
+    return patched
 
 
 def uninstall() -> None:
-    if "dummy_run" not in _originals:
-        return
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-        GPUModelRunner._dummy_run = _originals.pop("dummy_run")
+        if "dummy_run" in _originals:
+            GPUModelRunner._dummy_run = _originals.pop("dummy_run")
+        if "execute_model" in _originals:
+            GPUModelRunner.execute_model = _originals.pop("execute_model")
     except Exception:
         _originals.pop("dummy_run", None)
+        _originals.pop("execute_model", None)

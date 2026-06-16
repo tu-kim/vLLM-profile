@@ -44,14 +44,21 @@ VLLM_PROFILER=moe,attn  vllm serve deepseek-ai/DeepSeek-V3 --enforce-eager ...
 
 ### 3) 결과 요약
 ```bash
-python -m vllm_profiler.summarize ./vllm_prof_out            # 실데이터만 (dummy 제외)
-python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy  # warmup까지 포함
+python -m vllm_profiler.summarize ./vllm_prof_out             # 실데이터만 (dummy 제외)
+python -m vllm_profiler.summarize ./vllm_prof_out --include-dummy   # warmup 포함
+python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
+python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
 ```
 
-**Warmup/dummy 자동 분리:** vLLM 초기화 단계의 dummy forward(메모리 프로파일링,
-CUDA graph 캡처, DP idle-rank lockstep)는 모두 `GPUModelRunner._dummy_run`을
-통과합니다. 이 구간에서 찍힌 레코드에는 `dummy: True`가 태깅되고, summarize가
-**기본적으로 제외**합니다. 실제 추론(`execute_model` 경로)만 남습니다.
+**Warmup/init 자동 분리:** **첫 실제 추론(`execute_model`) 이전의 모든 이벤트는
+init/warmup으로 간주**되어 `dummy: True`로 태깅됩니다 — 메모리 프로파일링,
+**DeepGEMM/FlashInfer 커널 warmup**, CUDA graph 캡처, 가중치 로드 등 경로가 제각각인
+초기화 단계를 한 번에 커버합니다. 서빙 중 DP idle-rank lockstep(`_dummy_run`)도
+`dummy: True`로 태깅됩니다. summarize가 **기본 제외**하고 실데이터만 남깁니다.
+
+**prefill/decode 라벨:** 실제 forward는 `execute_model`에서 요청별 토큰 수로 분류해
+모든 이벤트에 `batch_type`(`prefill`/`decode`/`mixed`)을 태깅합니다. (chunked-prefill을
+안 쓰면 `mixed`는 나오지 않습니다.) `--phase=`로 단계별 집계 가능.
 
 ## 측정 항목 → 구현 매핑
 

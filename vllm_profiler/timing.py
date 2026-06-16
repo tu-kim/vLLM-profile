@@ -26,7 +26,7 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
     _CUDA = False
 
-from .recorder import get_recorder, in_dummy
+from .recorder import get_recorder, stamp_tags
 
 
 @dataclass
@@ -72,9 +72,8 @@ class Region:
 
     def __init__(self, kind: str, **fields: Any) -> None:
         # Timing records are emitted later (at resolve), so capture the run
-        # phase now, while the actual forward is running.
-        if in_dummy():
-            fields.setdefault("dummy", True)
+        # phase (dummy / prefill-decode) now, while the forward is running.
+        stamp_tags(fields)
         self.kind = kind
         self.fields = fields
 

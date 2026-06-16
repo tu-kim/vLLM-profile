@@ -30,7 +30,7 @@ except Exception:  # pragma: no cover
     torch = None  # type: ignore
 
 from . import timing
-from .recorder import get_recorder, in_dummy
+from .recorder import get_recorder, stamp_tags
 from .timing import Region, nbytes, register_resolver
 
 # --- per-MoE-call context (thread-local so _prepare/_finalize can find it) ----
@@ -159,8 +159,7 @@ class _DeferredBuffer:
 
     def add(self, kind: str, field: str, meta: dict, tensor: Any) -> None:
         # Capture run phase now; this buffer drains at flush time.
-        if in_dummy() and "dummy" not in meta:
-            meta = {**meta, "dummy": True}
+        meta = stamp_tags(dict(meta))
         self._pending.append((kind, field, meta, tensor))
 
     def drain(self) -> None:
