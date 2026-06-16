@@ -27,6 +27,18 @@ from .recorder import (
 _originals: dict[str, Any] = {}
 
 
+def _is_warmup_batch(scheduler_output: Any) -> bool:
+    """True for the Triton/sampler warmup (gpu/warmup.py), which runs a synthetic
+    prefill+decode through the *real* execute_model path using request ids
+    prefixed ``_warmup_``. Real requests never use that prefix, so this cleanly
+    separates the last init step from genuine serving."""
+    try:
+        nst = getattr(scheduler_output, "num_scheduled_tokens", None) or {}
+        return bool(nst) and any(str(k).startswith("_warmup_") for k in nst)
+    except Exception:
+        return False
+
+
 def _classify(runner: Any, scheduler_output: Any) -> str | None:
     """prefill / decode / mixed for a real forward.
 
@@ -76,6 +88,15 @@ def install() -> list[str]:
         orig_exec = GPUModelRunner.execute_model
 
         def execute_model(self, scheduler_output, *args, **kwargs):
+            # The Triton/sampler warmup (gpu/warmup.py) runs a synthetic
+            # prefill+decode through this very path; treat it as dummy so it
+            # neither pollutes data nor prematurely flips "serving started".
+            if _is_warmup_batch(scheduler_output):
+                enter_dummy()
+                try:
+                    return orig_exec(self, scheduler_output, *args, **kwargs)
+                finally:
+                    exit_dummy()
             bt = _classify(self, scheduler_output)
             if bt is not None:
                 # First real forward with scheduled work -> serving has begun;
