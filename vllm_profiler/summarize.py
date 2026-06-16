@@ -52,7 +52,30 @@ def _p(label, val, unit=""):
     print(f"    {label:<34} {val:>12.3f} {unit}")
 
 
-def summarize(path: str, phase: str | None = None, skip: int | None = None) -> None:
+def _by_seqlen(rows) -> None:
+    """Bucket key timing metrics by num_tokens (= prefill seq length with
+    max-num-seqs 1) for a seq-length sweep. moe_dispatch/combine num_tokens is
+    post-TP-chunk (L/TP); attn_total / moe_total are the full seq length."""
+    kinds = ["attn_total", "moe_total", "moe_dispatch", "moe_combine"]
+    by_kind = defaultdict(list)
+    for r in rows:
+        if r.get("kind") in kinds and r.get("ms") is not None:
+            by_kind[r["kind"]].append(r)
+    for kind in kinds:
+        recs = by_kind.get(kind)
+        if not recs:
+            continue
+        buckets = defaultdict(list)
+        for r in recs:
+            buckets[r.get("num_tokens")].append(r["ms"])
+        print(f"\n[by seqlen] {kind} (ms):")
+        for nt in sorted(buckets, key=lambda x: (x is None, x)):
+            ms = buckets[nt]
+            print(f"    num_tokens={str(nt):<8} n={len(ms):>7} avg={_mean(ms):.4f} ms")
+
+
+def summarize(path: str, phase: str | None = None, skip: int | None = None,
+              by_seqlen: bool = False) -> None:
     if skip is None:
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
@@ -73,6 +96,10 @@ def summarize(path: str, phase: str | None = None, skip: int | None = None) -> N
     if phase:
         rows = [r for r in rows if r.get("batch_type") == phase]
         print(f"(filtered to batch_type == {phase!r}: {len(rows)} records)")
+
+    if by_seqlen:
+        _by_seqlen(rows)
+        return
 
     if not rows:
         print("No matching records left after filtering.")
@@ -268,10 +295,12 @@ if __name__ == "__main__":
     argv = list(sys.argv[1:])
     phase = None
     skip = None  # None -> default fixed skip
+    by_seqlen = "--by-seqlen" in argv
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]
         elif a.startswith("--skip="):
             skip = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
-    summarize(pos[0] if pos else "./vllm_prof_out", phase=phase, skip=skip)
+    summarize(pos[0] if pos else "./vllm_prof_out", phase=phase, skip=skip,
+              by_seqlen=by_seqlen)
