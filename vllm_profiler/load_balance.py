@@ -73,6 +73,115 @@ def _report(tag: str, counts: list[float], experts_per_rank: int | None,
               f"(slowest rank does {rk['max_over_mean']:.2f}x the average work)")
 
 
+def _pct(sorted_xs: list[float], q: float) -> float:
+    n = len(sorted_xs)
+    if n == 1:
+        return sorted_xs[0]
+    idx = (q / 100) * (n - 1)
+    lo = int(idx)
+    hi = min(lo + 1, n - 1)
+    return sorted_xs[lo] * (1 - (idx - lo)) + sorted_xs[hi] * (idx - lo)
+
+
+def prefill_skew(path: str, skip: int | None = None) -> None:
+    """Prefill-only EP-rank load skewness.
+
+    1) per token-dispatch event (each moe_expert_load record), group the 256
+       experts into the 16 EP-rank blocks and measure the skewness (CoV,
+       max/mean) of the per-rank load -> averaged over events (+ percentiles).
+    2) per layer, aggregate the rank loads and report the hot / cold EP rank,
+       then show whether the hot/cold rank changes across layers.
+
+    Always skips >= 30000 leading lines per file (init/warmup).
+    """
+    skip = max(skip if skip is not None else _DEFAULT_SKIP, 30000)
+    covs: list[float] = []
+    mms: list[float] = []
+    layer_ranks: dict = {}            # layer -> [per-rank summed load]
+    epr = n_experts = None
+    n_events = 0
+
+    for fp in _find_files(path):
+        n = 0
+        for line in open(fp):
+            line = line.strip()
+            if not line:
+                continue
+            n += 1
+            if n <= skip:
+                continue
+            try:
+                r = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if r.get("kind") != "moe_expert_load":
+                continue
+            if r.get("batch_type") != "prefill" or r.get("dummy"):
+                continue
+            counts = r.get("counts")
+            e = r.get("experts_per_rank")
+            if not counts or not e or len(counts) % e:
+                continue
+            epr, n_experts = e, len(counts)
+            ranks = [sum(counts[i:i + e]) for i in range(0, len(counts), e)]
+            tot = sum(ranks)
+            if tot == 0:
+                continue
+            n_events += 1
+            mean = tot / len(ranks)
+            var = sum((x - mean) ** 2 for x in ranks) / len(ranks)
+            covs.append((var ** 0.5) / mean)
+            mms.append(max(ranks) / mean)
+            layer = r.get("moe_layer")
+            acc = layer_ranks.setdefault(layer, [0] * len(ranks))
+            for i, v in enumerate(ranks):
+                acc[i] += v
+
+    if not n_events:
+        print(f"No prefill moe_expert_load records (skip={skip}). "
+              f"Was prefill profiled with moe load balance? Check --info for 'cov'.")
+        return
+
+    n_ranks = n_experts // epr
+    print(f"=== Prefill EP-rank load skewness "
+          f"(skip={skip}/file, EP={n_ranks} ranks × {epr} experts) ===")
+
+    # 1) per-event skewness, averaged
+    sc, sm = sorted(covs), sorted(mms)
+    print(f"\n[per token-dispatch event skewness]  (n={n_events} events)")
+    print(f"  rank CoV      : mean={sum(covs)/len(covs):.3f}  p50={_pct(sc,50):.3f}"
+          f"  p90={_pct(sc,90):.3f}  p99={_pct(sc,99):.3f}")
+    print(f"  rank max/mean : mean={sum(mms)/len(mms):.3f}  p50={_pct(sm,50):.3f}"
+          f"  p90={_pct(sm,90):.3f}  p99={_pct(sm,99):.3f}")
+    print("  (per event: 16 EP-rank loads' dispersion; CoV=0 perfectly balanced)")
+
+    # 2) hot/cold EP rank per layer
+    print(f"\n[hot / cold EP-rank per layer]")
+    print(f"  {'layer':>5}  {'hot':>16}  {'cold':>16}")
+    hot_freq: dict = {}
+    cold_freq: dict = {}
+    for layer in sorted(layer_ranks):
+        rl = layer_ranks[layer]
+        m = sum(rl) / len(rl)
+        hot = max(range(len(rl)), key=lambda i: rl[i])
+        cold = min(range(len(rl)), key=lambda i: rl[i])
+        hot_freq[hot] = hot_freq.get(hot, 0) + 1
+        cold_freq[cold] = cold_freq.get(cold, 0) + 1
+        print(f"  {layer:>5}  rank{hot:>2} ({rl[hot]/m:>5.2f}x)  "
+              f"rank{cold:>2} ({rl[cold]/m:>5.2f}x)")
+    nlay = len(layer_ranks)
+    hot_top = sorted(hot_freq.items(), key=lambda x: -x[1])
+    cold_top = sorted(cold_freq.items(), key=lambda x: -x[1])
+    print(f"\n  hot-rank  across {nlay} layers: "
+          + ", ".join(f"rank{r}:{c}" for r, c in hot_top[:5]))
+    print(f"  cold-rank across {nlay} layers: "
+          + ", ".join(f"rank{r}:{c}" for r, c in cold_top[:5]))
+    stable = hot_top[0][1] / nlay
+    print(f"  -> hot EP-rank is {'STABLE' if stable > 0.6 else 'VARIES'} "
+          f"across layers (top rank{hot_top[0][0]} hottest in "
+          f"{hot_top[0][1]}/{nlay} = {100*stable:.0f}% of layers)")
+
+
 def load_balance(path: str, skip: int | None = None, by_layer: bool = False,
                  top: int = 10, include_dummy: bool = False) -> None:
     if skip is None:
@@ -154,5 +263,9 @@ if __name__ == "__main__":
         elif a.startswith("--top="):
             top = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
-    load_balance(pos[0] if pos else "./vllm_prof_out", skip=skip,
-                 by_layer=by_layer, top=top, include_dummy=include_dummy)
+    path = pos[0] if pos else "./vllm_prof_out"
+    if "--prefill-skew" in argv:
+        prefill_skew(path, skip=skip)
+    else:
+        load_balance(path, skip=skip, by_layer=by_layer, top=top,
+                     include_dummy=include_dummy)
