@@ -117,7 +117,13 @@ class Recorder:
         )
         self.rank = _detect_rank()
         os.makedirs(self.out_dir, exist_ok=True)
-        self.path = os.path.join(self.out_dir, f"prof_rank{self.rank}.jsonl")
+        # Include the short hostname so primary + headless node logs never
+        # collide even if rank detection falls back to local rank. The summarizer
+        # globs prof_rank*.jsonl and keys on the per-record "rank" field, so this
+        # suffix is transparent to it.
+        import socket
+        host = socket.gethostname().split(".")[0]
+        self.path = os.path.join(self.out_dir, f"prof_rank{self.rank}_{host}.jsonl")
         self._buf: list[str] = []
         self._lock = threading.Lock()
         self._closed = False

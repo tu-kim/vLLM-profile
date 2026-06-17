@@ -22,11 +22,21 @@ from collections import defaultdict
 _DEFAULT_SKIP = int(os.environ.get("VLLM_PROFILER_SKIP", "30000"))
 
 
+def _find_files(path: str) -> list[str]:
+    """All prof_rank*.jsonl under path, including node sub-directories (so logs
+    from primary + headless nodes can be merged by dropping each node's dir
+    under one parent)."""
+    files = set(glob.glob(os.path.join(path, "prof_rank*.jsonl")))
+    files |= set(glob.glob(os.path.join(path, "**", "prof_rank*.jsonl"),
+                           recursive=True))
+    return sorted(files)
+
+
 def _load(path: str, skip: int = 0):
-    """Load all rank files. ``skip`` drops the first N non-empty lines *per file*
-    (init/warmup records are written first in each rank's file)."""
+    """Load all rank files (recursively). ``skip`` drops the first N non-empty
+    lines *per file* (init/warmup records are written first in each file)."""
     rows = []
-    for fp in sorted(glob.glob(os.path.join(path, "prof_rank*.jsonl"))):
+    for fp in _find_files(path):
         n = 0
         with open(fp) as f:
             for line in f:
@@ -44,17 +54,21 @@ def _load(path: str, skip: int = 0):
 
 
 def _info(path: str) -> None:
-    """Per-file schema report -- which version-dependent fields each rank file
-    has, so a mix of addon versions can be parsed knowingly."""
-    files = sorted(glob.glob(os.path.join(path, "prof_rank*.jsonl")))
+    """Per-file schema + rank report. Shows which rank value(s) each file holds
+    so multi-node merges (primary + headless) can be checked for rank collisions
+    -- the same rank value appearing in two files means duplicate/overwritten
+    data (local-rank numbering instead of global)."""
+    files = _find_files(path)
     if not files:
         print(f"No prof_rank*.jsonl files under {path!r}")
         return
     feats = ["batch_type", "seq_len", "dummy", "cov", "pad_total", "expert_num_tokens"]
     print(f"\n=== schema info: {path} ({len(files)} files) ===")
+    rank_to_files: dict = {}
     for fp in files:
         n = 0
         kinds = set()
+        ranks = set()
         present = dict.fromkeys(feats, 0)
         with open(fp) as f:
             for line in f:
@@ -67,13 +81,25 @@ def _info(path: str) -> None:
                     continue
                 n += 1
                 kinds.add(r.get("kind"))
+                ranks.add(r.get("rank"))
                 for k in feats:
                     if k in r:
                         present[k] += 1
+        for rk in ranks:
+            rank_to_files.setdefault(rk, []).append(os.path.basename(fp))
         flags = " ".join(f"{k}={present[k]}" for k in feats)
-        print(f"  {os.path.basename(fp)}: {n} recs")
+        print(f"  {os.path.basename(fp)}: {n} recs | ranks={sorted(ranks)}")
         print(f"      fields: {flags}")
         print(f"      kinds : {sorted(k for k in kinds if k)}")
+    dupes = {rk: fs for rk, fs in rank_to_files.items() if len(fs) > 1}
+    print(f"\nranks total: {sorted(rank_to_files)}")
+    if dupes:
+        print("⚠ RANK COLLISION (same rank in multiple files -> duplicate data):")
+        for rk, fs in sorted(dupes.items()):
+            print(f"    rank {rk}: {fs}")
+        print("  -> these nodes used local-rank numbering; re-namespace before merge.")
+    else:
+        print("✓ no rank collision — safe to merge.")
 
 
 def _mean(xs):
