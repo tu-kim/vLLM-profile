@@ -49,7 +49,13 @@ python -m vllm_profiler.summarize ./vllm_prof_out --skip=0          # 스킵 없
 python -m vllm_profiler.summarize ./vllm_prof_out --skip=50000      # 앞 50000줄 제외
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
+python -m vllm_profiler.summarize ./vllm_prof_out --info            # 파일별 스키마/버전 확인
 ```
+
+**버전이 섞인 파일 파싱:** addon 버전마다 기록 필드가 다를 수 있습니다. summarize는
+없는 필드를 graceful하게 건너뛰며, `--info`로 **각 rank 파일이 어떤 필드(batch_type /
+seq_len / dummy / cov / 패딩 등)를 가졌는지** 먼저 확인할 수 있습니다. 옛 파일이 기본
+`--skip`보다 짧으면 "use --skip=0" 힌트가 뜹니다.
 
 **init/warmup 제거 = 앞쪽 고정 스킵.** vLLM 초기화(메모리 프로파일링, DeepGEMM/FlashInfer
 warmup, Triton/샘플러 warmup, cudagraph 캡처)는 각 rank 파일 **앞쪽**에 기록됩니다. 이

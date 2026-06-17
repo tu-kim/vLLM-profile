@@ -43,6 +43,39 @@ def _load(path: str, skip: int = 0):
     return rows
 
 
+def _info(path: str) -> None:
+    """Per-file schema report -- which version-dependent fields each rank file
+    has, so a mix of addon versions can be parsed knowingly."""
+    files = sorted(glob.glob(os.path.join(path, "prof_rank*.jsonl")))
+    if not files:
+        print(f"No prof_rank*.jsonl files under {path!r}")
+        return
+    feats = ["batch_type", "seq_len", "dummy", "cov", "pad_total", "expert_num_tokens"]
+    print(f"\n=== schema info: {path} ({len(files)} files) ===")
+    for fp in files:
+        n = 0
+        kinds = set()
+        present = dict.fromkeys(feats, 0)
+        with open(fp) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                n += 1
+                kinds.add(r.get("kind"))
+                for k in feats:
+                    if k in r:
+                        present[k] += 1
+        flags = " ".join(f"{k}={present[k]}" for k in feats)
+        print(f"  {os.path.basename(fp)}: {n} recs")
+        print(f"      fields: {flags}")
+        print(f"      kinds : {sorted(k for k in kinds if k)}")
+
+
 def _mean(xs):
     xs = [x for x in xs if x is not None]
     return sum(xs) / len(xs) if xs else 0.0
@@ -98,8 +131,13 @@ def summarize(path: str, phase: str | None = None, skip: int | None = None,
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
     if not rows:
-        print(f"No records found under {path!r}" +
-              (f" (after skipping first {skip} lines/file)" if skip else ""))
+        raw = _load(path, skip=0) if skip else []
+        if raw:
+            print(f"No records left after skipping {skip} lines/file, but "
+                  f"{len(raw)} records exist -- these files are shorter than the "
+                  f"default skip. Re-run with a smaller --skip (e.g. --skip=0).")
+        else:
+            print(f"No records found under {path!r}")
         return
     if skip:
         print(f"(skipped first {skip} lines per rank file; --skip=0 to keep)")
@@ -325,6 +363,10 @@ if __name__ == "__main__":
     by_seqlen = "--by-seqlen" in argv
     include_dummy = "--include-dummy" in argv
     bin_width = None
+    pos0 = [a for a in argv if not a.startswith("--")]
+    if "--info" in argv:
+        _info(pos0[0] if pos0 else "./vllm_prof_out")
+        sys.exit(0)
     for a in argv:
         if a.startswith("--phase="):
             phase = a.split("=", 1)[1]
