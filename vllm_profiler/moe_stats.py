@@ -11,6 +11,7 @@ loader (so multi-node merges + per-file init skip work the same).
 
 from __future__ import annotations
 
+import os
 import sys
 from collections import defaultdict
 
@@ -131,8 +132,56 @@ def _deep(grouped: dict) -> None:
                   f"{'≈constant → group-load/dummy-dominated' if st_recv['cov'] < 0.3 else 'variable → real-load driven'}")
 
 
+def _plot(grouped: dict, outdir: str) -> list[str]:
+    """Render histograms (amplification / tokens_sent / tokens_recv) per
+    batch_type as PNGs. Log-x for the heavy-tailed quantities."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    os.makedirs(outdir, exist_ok=True)
+    saved = []
+    for bt in [b for b in ("prefill", "decode", "mixed", "unknown") if b in grouped]:
+        disp = grouped[bt].get("moe_dispatch_size", [])
+        tin = [r.get("tokens_in") for r in disp if r.get("tokens_in")]
+        trecv = [r.get("tokens_recv") for r in disp if r.get("tokens_recv")]
+        amp = [r["tokens_recv"] / r["tokens_in"] for r in disp
+               if r.get("tokens_in") and r.get("tokens_recv")]
+        if not amp:
+            continue
+        panels = [("amplification (recv/sent)", amp, True),
+                  ("tokens_sent", tin, False),
+                  ("tokens_recv", trecv, True)]
+        fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+        for ax, (name, xs, logx) in zip(axes, panels):
+            xs = [x for x in xs if x is not None and x > 0]
+            if logx and max(xs) > min(xs):
+                bins = np.logspace(np.log10(min(xs)), np.log10(max(xs)), 40)
+                ax.set_xscale("log")
+            else:
+                bins = 40
+            ax.hist(xs, bins=bins, color="#4C78A8", edgecolor="white", linewidth=0.3)
+            s = sorted(xs)
+            p50 = s[len(s) // 2]
+            mean = sum(s) / len(s)
+            ax.axvline(p50, color="green", ls="--", lw=1.2, label=f"p50={p50:.1f}")
+            ax.axvline(mean, color="red", ls="--", lw=1.2, label=f"mean={mean:.1f}")
+            ax.set_title(name)
+            ax.set_xlabel(name)
+            ax.set_ylabel("count")
+            ax.legend(fontsize=8)
+        fig.suptitle(f"MoE dispatch — {bt}  (n={len(amp)})", fontsize=13)
+        fig.tight_layout()
+        path = os.path.join(outdir, f"moe_hist_{bt}.png")
+        fig.savefig(path, dpi=110)
+        plt.close(fig)
+        saved.append(path)
+    return saved
+
+
 def moe_stats(path: str, skip: int | None = None, include_dummy: bool = False,
-              deep: bool = False) -> None:
+              deep: bool = False, plot: str | None = None) -> None:
     if skip is None:
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
@@ -171,15 +220,30 @@ def moe_stats(path: str, skip: int | None = None, include_dummy: bool = False,
         print("\n=== amplification deep-dive ===")
         _deep(grouped)
 
+    if plot is not None:
+        outdir = plot or os.path.join(path, "moe_plots")
+        try:
+            saved = _plot(grouped, outdir)
+            print(f"\n[plot] wrote {len(saved)} histogram(s):")
+            for p in saved:
+                print(f"    {p}")
+        except Exception as e:
+            print(f"\n[plot] failed ({e}); is matplotlib installed?")
+
 
 if __name__ == "__main__":
     argv = sys.argv[1:]
     include_dummy = "--include-dummy" in argv
     deep = "--deep" in argv
+    plot = None
     skip = None
     for a in argv:
         if a.startswith("--skip="):
             skip = int(a.split("=", 1)[1])
+        elif a == "--plot":
+            plot = ""  # default outdir
+        elif a.startswith("--plot="):
+            plot = a.split("=", 1)[1]
     pos = [a for a in argv if not a.startswith("--")]
     moe_stats(pos[0] if pos else "./vllm_prof_out", skip=skip,
-              include_dummy=include_dummy, deep=deep)
+              include_dummy=include_dummy, deep=deep, plot=plot)
