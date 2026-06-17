@@ -45,25 +45,36 @@ _ctx = threading.local()
 _layer_ids: dict[int, int] = {}
 _call_seq = 0
 
-# Submodules to instrument, keyed by the role used in the comp/comm breakdown.
-# Only those present on a given instance are wrapped.
+# Submodules to instrument, mapped to one of 6 categories. Only submodules
+# present on a given instance are wrapped, so the same table covers both
+# GQA (Llama) and MLA (DeepSeek):
+#
+#   in_proj   : hidden -> Q/K/V (GQA) or hidden -> compressed latent (MLA down-proj)
+#   up_proj   : latent -> full Q/K/V heads (MLA decompress; may fold into core_attn)
+#   norm      : latent layernorm (MLA only; small)
+#   rope      : rotary position embedding
+#   core_attn : KV-cache attention (softmax, value, the MLA W_UK/W_UV BMMs)
+#   out_proj  : output projection (RowParallelLinear -> compute + TP all-reduce)
 _ROLES = {
-    # projections (column/replicated -> compute only, no all-reduce in forward)
-    "qkv_proj": "proj",
-    "fused_qkv_a_proj": "proj_down",   # MLA: fused q+kv latent down-projection
-    "q_proj": "proj",
-    "q_a_proj": "proj_down",
-    "q_b_proj": "proj_up",
-    "kv_a_proj_with_mqa": "proj_down",
-    "kv_b_proj": "proj_up",
-    "kv_a_layernorm": "norm",
+    # input / down projection
+    "qkv_proj": "in_proj",              # GQA: hidden -> Q,K,V
+    "fused_qkv_a_proj": "in_proj",      # MLA: fused q+kv latent down-projection
+    "q_proj": "in_proj",
+    "q_a_proj": "in_proj",
+    "kv_a_proj_with_mqa": "in_proj",
+    # up / decompress projection (MLA)
+    "q_b_proj": "up_proj",
+    "kv_b_proj": "up_proj",
+    # latent layernorm (MLA)
     "q_a_layernorm": "norm",
+    "kv_a_layernorm": "norm",
+    # rotary position embedding
     "rotary_emb": "rope",
-    # core attention (KV-cache load/store happens here)
+    # core KV-cache attention
     "attn": "core_attn",
     "mla_attn": "core_attn",
-    # output projection: RowParallelLinear -> compute + TP all-reduce (comm)
-    "o_proj": "out_proj_comm",
+    # output projection (+ TP all-reduce)
+    "o_proj": "out_proj",
 }
 
 
