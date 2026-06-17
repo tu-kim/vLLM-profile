@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .recorder import set_batch_type, set_seq_len
+from .recorder import enter_dummy, exit_dummy, set_batch_type, set_seq_len
 
 _originals: dict[str, Any] = {}
 
@@ -71,30 +71,52 @@ def install() -> list[str]:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
     except Exception:
         return []
-    if "execute_model" in _originals:
-        return []
-    orig_exec = GPUModelRunner.execute_model
+    patched = []
 
-    def execute_model(self, scheduler_output, *args, **kwargs):
-        set_batch_type(_classify(self, scheduler_output))
-        set_seq_len(_seq_len(scheduler_output))
-        try:
-            return orig_exec(self, scheduler_output, *args, **kwargs)
-        finally:
-            set_batch_type(None)
-            set_seq_len(None)
+    # _dummy_run is always a dummy forward (warmup / cudagraph capture / DP
+    # idle-rank lockstep). Tag everything it produces as dummy=True. No serving
+    # gate -- real inference never goes through _dummy_run.
+    if "dummy_run" not in _originals:
+        orig_dummy = GPUModelRunner._dummy_run
 
-    _originals["execute_model"] = orig_exec
-    GPUModelRunner.execute_model = execute_model
-    return ["GPUModelRunner.execute_model"]
+        def _dummy_run(self, *args, **kwargs):
+            enter_dummy()
+            try:
+                return orig_dummy(self, *args, **kwargs)
+            finally:
+                exit_dummy()
+
+        _originals["dummy_run"] = orig_dummy
+        GPUModelRunner._dummy_run = _dummy_run
+        patched.append("GPUModelRunner._dummy_run")
+
+    if "execute_model" not in _originals:
+        orig_exec = GPUModelRunner.execute_model
+
+        def execute_model(self, scheduler_output, *args, **kwargs):
+            set_batch_type(_classify(self, scheduler_output))
+            set_seq_len(_seq_len(scheduler_output))
+            try:
+                return orig_exec(self, scheduler_output, *args, **kwargs)
+            finally:
+                set_batch_type(None)
+                set_seq_len(None)
+
+        _originals["execute_model"] = orig_exec
+        GPUModelRunner.execute_model = execute_model
+        patched.append("GPUModelRunner.execute_model")
+
+    return patched
 
 
 def uninstall() -> None:
-    if "execute_model" not in _originals:
-        return
     try:
         from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
-        GPUModelRunner.execute_model = _originals.pop("execute_model")
+        if "dummy_run" in _originals:
+            GPUModelRunner._dummy_run = _originals.pop("dummy_run")
+        if "execute_model" in _originals:
+            GPUModelRunner.execute_model = _originals.pop("execute_model")
     except Exception:
+        _originals.pop("dummy_run", None)
         _originals.pop("execute_model", None)

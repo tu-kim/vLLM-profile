@@ -29,11 +29,34 @@ except Exception:  # pragma: no cover - import guard
 _FLUSH_EVERY = int(os.environ.get("VLLM_PROFILER_FLUSH_EVERY", "1024"))
 
 # --- run-phase tracking -------------------------------------------------------
+# Dummy-run depth. GPUModelRunner._dummy_run is, by definition, ALWAYS a dummy
+# forward (warmup / cudagraph capture / DP idle-rank lockstep) -- real inference
+# never goes through it. So tagging records produced inside it as dummy=True is
+# unambiguous and safe (this is the part that was correct before; the buggy bit
+# was the separate "serving not started" gate, which is NOT reintroduced).
+_dummy_depth = 0
+_dummy_lock = threading.Lock()
+
+
+def enter_dummy() -> None:
+    global _dummy_depth
+    with _dummy_lock:
+        _dummy_depth += 1
+
+
+def exit_dummy() -> None:
+    global _dummy_depth
+    with _dummy_lock:
+        if _dummy_depth > 0:
+            _dummy_depth -= 1
+
+
+def in_dummy() -> bool:
+    return _dummy_depth > 0
+
+
 # Current batch phase ("prefill" / "decode" / "mixed"), set per forward pass by
 # the execute_model wrapper (runphase.py). None outside a real forward.
-#
-# NOTE: init/warmup separation is handled bluntly by summarize's fixed line skip
-# (init records sit at the front of each rank file), not by dummy tagging.
 _batch_type: str | None = None
 
 
@@ -59,8 +82,10 @@ def set_seq_len(n: int | None) -> None:
 
 
 def stamp_tags(d: dict) -> dict:
-    """Stamp current batch phase + seq length, captured now (deferred records
-    emit later, so the value must be read at capture time)."""
+    """Stamp dummy flag + batch phase + seq length, captured now (deferred
+    records emit later, so the value must be read at capture time)."""
+    if _dummy_depth > 0:
+        d.setdefault("dummy", True)
     if _batch_type is not None:
         d.setdefault("batch_type", _batch_type)
     if _seq_len is not None:

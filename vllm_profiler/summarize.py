@@ -92,7 +92,8 @@ def _by_seqlen(rows, bin_width: int | None = None) -> None:
 
 
 def summarize(path: str, phase: str | None = None, skip: int | None = None,
-              by_seqlen: bool = False, bin_width: int | None = None) -> None:
+              by_seqlen: bool = False, bin_width: int | None = None,
+              include_dummy: bool = False) -> None:
     if skip is None:
         skip = _DEFAULT_SKIP
     rows = _load(path, skip=skip)
@@ -102,6 +103,15 @@ def summarize(path: str, phase: str | None = None, skip: int | None = None,
         return
     if skip:
         print(f"(skipped first {skip} lines per rank file; --skip=0 to keep)")
+
+    # Drop dummy-run records (warmup / cudagraph capture / DP idle-rank
+    # lockstep), which go through _dummy_run and are tagged dummy=True.
+    n_dummy = sum(1 for r in rows if r.get("dummy"))
+    if not include_dummy:
+        rows = [r for r in rows if not r.get("dummy")]
+    if n_dummy:
+        print(f"({'kept' if include_dummy else 'dropped'} {n_dummy} dummy records; "
+              f"--include-dummy to keep)")
 
     # Per-forward phase (prefill / decode / mixed) breakdown + optional filter.
     bt_counts = defaultdict(int)
@@ -313,6 +323,7 @@ if __name__ == "__main__":
     phase = None
     skip = None  # None -> default fixed skip
     by_seqlen = "--by-seqlen" in argv
+    include_dummy = "--include-dummy" in argv
     bin_width = None
     for a in argv:
         if a.startswith("--phase="):
@@ -323,4 +334,4 @@ if __name__ == "__main__":
             bin_width = int(a.split("=", 1)[1])
     pos = [a for a in argv if not a.startswith("--")]
     summarize(pos[0] if pos else "./vllm_prof_out", phase=phase, skip=skip,
-              by_seqlen=by_seqlen, bin_width=bin_width)
+              by_seqlen=by_seqlen, bin_width=bin_width, include_dummy=include_dummy)

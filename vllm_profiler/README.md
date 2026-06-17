@@ -63,6 +63,12 @@ init 레코드를 신뢰성 있게 태깅하기 어렵고(경로가 제각각), 
 모든 이벤트에 `batch_type`(`prefill`/`decode`/`mixed`)을 태깅합니다. (chunked-prefill을
 안 쓰면 `mixed`는 나오지 않습니다.) `--phase=`로 단계별 집계 가능.
 
+**DP idle-rank dummy 필터:** 서빙 중 일감 없는 DP rank가 lockstep을 위해 돌리는 1-토큰
+dummy forward는 `_dummy_run` 경로라 ① **`dummy: True`로 태깅**되고 ② `execute_model`을
+안 타서 **`batch_type`이 없습니다**. summarize가 `dummy=True`를 **기본 제외**합니다
+(`--include-dummy`로 포함). 추가로 `--phase=prefill`/`decode`는 batch_type 없는 dummy를
+자동으로 걸러냅니다 — 두 신호 중 아무거나로 구분 가능.
+
 ## 측정 항목 → 구현 매핑
 
 ### MoE (`enable("moe")`) — hook: `FusedMoEKernelModularImpl`
