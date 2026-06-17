@@ -51,6 +51,8 @@ python -m vllm_profiler.summarize ./vllm_prof_out --phase=decode    # decode만
 python -m vllm_profiler.summarize ./vllm_prof_out --phase=prefill   # prefill만
 python -m vllm_profiler.summarize ./vllm_prof_out --info            # 파일별 스키마/버전 확인
 python -m vllm_profiler.moe_stats  ./vllm_prof_out                  # MoE 전송량 prefill/decode별 mean/p50/p90/p99
+python -m vllm_profiler.moe_stats  ./vllm_prof_out --deep --plot   # amplification 분포 히스토그램(PNG)
+python -m vllm_profiler.load_balance ./vllm_prof_out               # expert/EP-rank 부하 불균형 (집계)
 ```
 
 **버전이 섞인 파일 파싱:** addon 버전마다 기록 필드가 다를 수 있습니다. summarize는
