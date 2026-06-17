@@ -18,10 +18,13 @@ from .summarize import _DEFAULT_SKIP, _load
 
 # (label, record kind, value fn, unit divisor, unit label)
 _METRICS = [
+    # send = data this rank pushes into the collective, recv = data it gets out.
+    # dispatch(all-gather): send small (my tokens) -> recv big (all tokens).
+    # combine(reduce-scatter): send big (my expert outputs) -> recv small (my results).
     ("dispatch_send", "moe_dispatch_size", lambda r: r.get("bytes_in"), 1e6, "MB"),
     ("dispatch_recv", "moe_dispatch_size", lambda r: r.get("bytes_recv"), 1e6, "MB"),
-    ("combine_in",    "moe_combine_size", lambda r: r.get("bytes_in"), 1e6, "MB"),
-    ("combine_out",   "moe_combine_size", lambda r: r.get("bytes_out"), 1e6, "MB"),
+    ("combine_send",  "moe_combine_size", lambda r: r.get("bytes_in"), 1e6, "MB"),
+    ("combine_recv",  "moe_combine_size", lambda r: r.get("bytes_out"), 1e6, "MB"),
     ("tokens_sent",   "moe_dispatch_size", lambda r: r.get("tokens_in"), 1, "tok"),
     ("tokens_recv",   "moe_dispatch_size", lambda r: r.get("tokens_recv"), 1, "tok"),
     ("amplification", "moe_dispatch_size",
