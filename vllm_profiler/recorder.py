@@ -94,13 +94,21 @@ def stamp_tags(d: dict) -> dict:
 
 
 def _detect_rank() -> int:
-    """Best-effort global rank detection without forcing torch.distributed init."""
+    """Best-effort global rank detection. Called lazily at first record(), by
+    which time a forward is running and torch.distributed is initialized."""
     if torch is not None:
         try:
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 return torch.distributed.get_rank()
         except Exception:
             pass
+    # vLLM's own global rank (set even when the default pg differs).
+    try:
+        from vllm.distributed.parallel_state import get_world_group
+
+        return get_world_group().rank_in_group
+    except Exception:
+        pass
     for key in ("RANK", "VLLM_DP_RANK", "LOCAL_RANK"):
         val = os.environ.get(key)
         if val is not None and val.lstrip("-").isdigit():
@@ -115,33 +123,43 @@ class Recorder:
         self.out_dir = out_dir or os.environ.get(
             "VLLM_PROFILER_DIR", "./vllm_prof_out"
         )
-        self.rank = _detect_rank()
-        os.makedirs(self.out_dir, exist_ok=True)
-        # Include the short hostname so primary + headless node logs never
-        # collide even if rank detection falls back to local rank. The summarizer
-        # globs prof_rank*.jsonl and keys on the per-record "rank" field, so this
-        # suffix is transparent to it.
-        import socket
-        host = socket.gethostname().split(".")[0]
-        self.path = os.path.join(self.out_dir, f"prof_rank{self.rank}_{host}.jsonl")
+        # IMPORTANT: do NOT detect the rank or open the file here. This object is
+        # created at enable()/plugin-load time, *before* torch.distributed is
+        # initialized in the worker (and mp/Ray launchers don't set RANK env), so
+        # detecting now would label every worker rank 0 -> all write one file.
+        # Defer rank detection + file open to the first record(), by which time a
+        # forward is running and torch.distributed is up -> correct global rank.
+        self.rank: int | None = None
+        self.path: str | None = None
         self._buf: list[str] = []
         self._lock = threading.Lock()
         self._closed = False
-        # Truncate any stale file from a previous run for this rank.
-        with open(self.path, "w"):
-            pass
         atexit.register(self.close)
 
+    def _ensure_open(self) -> None:
+        if self.path is not None:
+            return
+        self.rank = _detect_rank()
+        os.makedirs(self.out_dir, exist_ok=True)
+        # Hostname suffix so primary + headless node logs never collide even if
+        # rank detection still falls back to local rank. Transparent to the
+        # summarizer (it globs prof_rank*.jsonl, keys on the "rank" field).
+        import socket
+        host = socket.gethostname().split(".")[0]
+        self.path = os.path.join(self.out_dir, f"prof_rank{self.rank}_{host}.jsonl")
+        with open(self.path, "w"):  # truncate any stale file
+            pass
+
     def record(self, kind: str, **fields: Any) -> None:
-        rec = {"kind": kind, "rank": self.rank, "t_wall": time.time(), **fields}
-        # Tag with batch phase (prefill/decode) unless the caller already
-        # stamped it at capture time (see Region / _DeferredBuffer).
-        stamp_tags(rec)
-        line = json.dumps(rec, default=_jsonable)
         with self._lock:
             if self._closed:
                 return
-            self._buf.append(line)
+            self._ensure_open()
+            rec = {"kind": kind, "rank": self.rank, "t_wall": time.time(), **fields}
+            # Tag with batch phase (prefill/decode) unless the caller already
+            # stamped it at capture time (see Region / _DeferredBuffer).
+            stamp_tags(rec)
+            self._buf.append(json.dumps(rec, default=_jsonable))
             if len(self._buf) >= _FLUSH_EVERY:
                 self._flush_locked()
 
@@ -150,7 +168,7 @@ class Recorder:
             self._flush_locked()
 
     def _flush_locked(self) -> None:
-        if not self._buf:
+        if not self._buf or self.path is None:
             return
         with open(self.path, "a") as f:
             f.write("\n".join(self._buf))
